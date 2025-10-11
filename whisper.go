@@ -25,15 +25,8 @@ import (
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
 	whisperv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1"
 	"github.com/davidsbond/whisper/internal/service"
-	"github.com/davidsbond/whisper/internal/store"
-)
-
-type (
-	peerStore interface {
-		FindPeer(ctx context.Context, id uint64) (*whisperv1.Peer, error)
-		SavePeer(ctx context.Context, peer *whisperv1.Peer) error
-		ListPeers(ctx context.Context) ([]*whisperv1.Peer, error)
-	}
+	"github.com/davidsbond/whisper/pkg/peer"
+	"github.com/davidsbond/whisper/pkg/store"
 )
 
 func Run(ctx context.Context, options ...Option) error {
@@ -68,15 +61,15 @@ func Run(ctx context.Context, options ...Option) error {
 }
 
 func bootstrap(ctx context.Context, cfg *config) error {
-	self := &whisperv1.Peer{
-		Id:      cfg.id,
+	self := peer.Peer{
+		ID:      cfg.id,
 		Address: cfg.address,
 		Delta:   time.Now().Unix(),
-		Status:  whisperv1.PeerStatus_PEER_STATUS_JOINING,
+		Status:  peer.StatusJoining,
 	}
 
 	if cfg.joinAddress == "" {
-		self.Status = whisperv1.PeerStatus_PEER_STATUS_JOINED
+		self.Status = peer.StatusJoined
 	}
 
 	if cfg.metadata != nil {
@@ -98,7 +91,7 @@ func bootstrap(ctx context.Context, cfg *config) error {
 			With("public_key", base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())).
 			Debug("generated new private key")
 
-		self.PublicKey = key.PublicKey().Bytes()
+		self.PublicKey = key.PublicKey()
 		cfg.key = key
 	}
 
@@ -115,21 +108,58 @@ func bootstrap(ctx context.Context, cfg *config) error {
 	return nil
 }
 
-func join(ctx context.Context, cfg *config, self *whisperv1.Peer) error {
+func join(ctx context.Context, cfg *config, self peer.Peer) error {
 	client, closer, err := dialPeer(cfg.joinAddress)
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
 	}
 
 	defer closer()
-	request := &whispersvcv1.JoinRequest{Peer: self}
+
+	request := &whispersvcv1.JoinRequest{
+		Peer: &whisperv1.Peer{
+			Id:        self.ID,
+			Address:   self.Address,
+			PublicKey: self.PublicKey.Bytes(),
+			Delta:     self.Delta,
+			Status:    whisperv1.PeerStatus(self.Status),
+		},
+	}
+
+	if self.Metadata != nil {
+		request.Peer.Metadata, err = anypb.New(self.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal metadata: %w", err)
+		}
+	}
+
 	response, err := client.Join(ctx, request)
 	if err != nil {
 		return fmt.Errorf("failed to send join request: %w", err)
 	}
 
-	for _, peer := range response.GetPeers() {
-		if err = cfg.store.SavePeer(ctx, peer); err != nil {
+	for _, protoPeer := range response.GetPeers() {
+		publicKey, err := cfg.curve.NewPublicKey(protoPeer.GetPublicKey())
+		if err != nil {
+			return fmt.Errorf("failed to parse public key for peer %d: %w", protoPeer.GetId(), err)
+		}
+
+		p := peer.Peer{
+			ID:        protoPeer.GetId(),
+			Address:   protoPeer.GetAddress(),
+			Delta:     protoPeer.GetDelta(),
+			Status:    peer.Status(protoPeer.GetStatus()),
+			PublicKey: publicKey,
+		}
+
+		if protoPeer.GetMetadata() != nil {
+			p.Metadata, err = protoPeer.GetMetadata().UnmarshalNew()
+			if err != nil {
+				return fmt.Errorf("failed to unmarshal metadata for peer %d: %w", protoPeer.GetId(), err)
+			}
+		}
+
+		if err = cfg.store.SavePeer(ctx, p); err != nil {
 			return fmt.Errorf("failed to save peer record: %w", err)
 		}
 	}
@@ -147,23 +177,23 @@ func leave(cfg *config) error {
 		return fmt.Errorf("failed to list peers: %w", err)
 	}
 
-	var selected *whisperv1.Peer
-	for _, peer := range peers {
-		if peer.Id == cfg.id {
+	var selected peer.Peer
+	for _, p := range peers {
+		if p.ID == cfg.id {
 			continue
 		}
 
-		if peer.Status == whisperv1.PeerStatus_PEER_STATUS_JOINED {
-			selected = peer
+		if p.Status == peer.StatusJoined {
+			selected = p
 			break
 		}
 	}
 
-	if selected == nil {
+	if selected.IsEmpty() {
 		return errors.New("failed to find an active peer to inform for leaving gossip network")
 	}
 
-	client, closer, err := dialPeer(selected.GetAddress())
+	client, closer, err := dialPeer(selected.Address)
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
 	}
@@ -184,7 +214,7 @@ func listenTCP(ctx context.Context, cfg *config) error {
 	}
 
 	server := grpc.NewServer()
-	service.New(cfg.store, cfg.curve).Register(server)
+	service.New(cfg.id, cfg.store, cfg.curve).Register(server)
 
 	group, ctx := errgroup.WithContext(ctx)
 
@@ -265,9 +295,9 @@ func handlePeerMessage(ctx context.Context, group *sync.WaitGroup, cfg *config, 
 		return
 	}
 
-	logger = logger.With("peer_id", remote.GetId())
+	logger = logger.With("peer_id", remote.ID)
 
-	local, err := cfg.store.FindPeer(ctx, remote.GetId())
+	local, err := cfg.store.FindPeer(ctx, remote.ID)
 	switch {
 	case errors.Is(err, store.ErrPeerNotFound):
 		break
@@ -277,7 +307,7 @@ func handlePeerMessage(ctx context.Context, group *sync.WaitGroup, cfg *config, 
 	}
 
 	// The inbound peer data is newer than ours, so we should update our local state.
-	if remote.GetDelta() > local.GetDelta() {
+	if remote.Delta > local.Delta {
 		logger.Debug("got new peer data")
 
 		if err = cfg.store.SavePeer(ctx, remote); err != nil {
@@ -288,7 +318,7 @@ func handlePeerMessage(ctx context.Context, group *sync.WaitGroup, cfg *config, 
 	}
 
 	// We're already up-to-date for this peer, so we'll exit early here.
-	if remote.GetDelta() == local.GetDelta() {
+	if remote.Delta == local.Delta {
 		return
 	}
 
@@ -301,8 +331,8 @@ func handlePeerMessage(ctx context.Context, group *sync.WaitGroup, cfg *config, 
 	}
 }
 
-func sendPeerMessage(cfg *config, target, local *whisperv1.Peer) error {
-	udp, err := net.ResolveUDPAddr("udp", target.GetAddress())
+func sendPeerMessage(cfg *config, target, local peer.Peer) error {
+	udp, err := net.ResolveUDPAddr("udp", target.Address)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
 	}
@@ -336,25 +366,20 @@ func sendPeerMessage(cfg *config, target, local *whisperv1.Peer) error {
 	return nil
 }
 
-func decryptPeer(cfg *config, source *whisperv1.Peer, message *whisperv1.PeerMessage) (*whisperv1.Peer, error) {
-	publicKey, err := cfg.curve.NewPublicKey(source.GetPublicKey())
+func decryptPeer(cfg *config, source peer.Peer, message *whisperv1.PeerMessage) (peer.Peer, error) {
+	secret, err := cfg.key.ECDH(source.PublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse public key: %w", err)
-	}
-
-	secret, err := cfg.key.ECDH(publicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive shared secret: %w", err)
+		return peer.Peer{}, fmt.Errorf("failed to derive shared secret: %w", err)
 	}
 
 	block, err := aes.NewCipher(secret)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create AES block: %w", err)
+		return peer.Peer{}, fmt.Errorf("failed to create AES block: %w", err)
 	}
 
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
+		return peer.Peer{}, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
 	nonce := message.GetNonce()
@@ -362,24 +387,39 @@ func decryptPeer(cfg *config, source *whisperv1.Peer, message *whisperv1.PeerMes
 
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt peer: %w", err)
+		return peer.Peer{}, fmt.Errorf("failed to decrypt peer: %w", err)
 	}
 
-	peer := &whisperv1.Peer{}
-	if err = proto.Unmarshal(plaintext, peer); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal peer: %w", err)
+	protoPeer := &whisperv1.Peer{}
+	if err = proto.Unmarshal(plaintext, protoPeer); err != nil {
+		return peer.Peer{}, fmt.Errorf("failed to unmarshal peer: %w", err)
 	}
 
-	return peer, nil
+	publicKey, err := cfg.curve.NewPublicKey(protoPeer.GetPublicKey())
+	if err != nil {
+		return peer.Peer{}, fmt.Errorf("failed to parse public key: %w", err)
+	}
+
+	p := peer.Peer{
+		ID:        protoPeer.GetId(),
+		Address:   protoPeer.GetAddress(),
+		Delta:     protoPeer.GetDelta(),
+		Status:    peer.Status(protoPeer.GetStatus()),
+		PublicKey: publicKey,
+	}
+
+	if protoPeer.Metadata != nil {
+		p.Metadata, err = protoPeer.Metadata.UnmarshalNew()
+		if err != nil {
+			return peer.Peer{}, fmt.Errorf("failed to unmarshal peer metadata: %w", err)
+		}
+	}
+
+	return p, nil
 }
 
-func encryptPeer(cfg *config, target, peer *whisperv1.Peer) (nonce, ciphertext []byte, err error) {
-	publicKey, err := cfg.curve.NewPublicKey(target.GetPublicKey())
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse public key: %w", err)
-	}
-
-	secret, err := cfg.key.ECDH(publicKey)
+func encryptPeer(cfg *config, target, peer peer.Peer) (nonce, ciphertext []byte, err error) {
+	secret, err := cfg.key.ECDH(target.PublicKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to derive shared secret: %w", err)
 	}
@@ -394,7 +434,22 @@ func encryptPeer(cfg *config, target, peer *whisperv1.Peer) (nonce, ciphertext [
 		return nil, nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	plaintext, err := proto.Marshal(peer)
+	protoPeer := &whisperv1.Peer{
+		Id:        peer.ID,
+		Address:   peer.Address,
+		PublicKey: peer.PublicKey.Bytes(),
+		Delta:     peer.Delta,
+		Status:    whisperv1.PeerStatus(peer.Status),
+	}
+
+	if peer.Metadata != nil {
+		protoPeer.Metadata, err = anypb.New(peer.Metadata)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal peer metadata: %w", err)
+		}
+	}
+
+	plaintext, err := proto.Marshal(protoPeer)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to marshal peer: %w", err)
 	}
@@ -434,15 +489,15 @@ func gossip(ctx context.Context, cfg *config) error {
 			}
 
 			target := peers[idx.Int64()]
-			if target.GetId() == cfg.id || target.Status != whisperv1.PeerStatus_PEER_STATUS_JOINED {
+			if target.ID == cfg.id || target.Status != peer.StatusJoined {
 				continue
 			}
 
-			logger := cfg.logger.With("target_id", target.GetId())
+			logger := cfg.logger.With("target_id", target.ID)
 
-			for _, peer := range peers {
-				if err = sendPeerMessage(cfg, target, peer); err != nil {
-					logger.With("error", err, "peer_id", peer.GetId()).Error("failed to send peer message")
+			for _, p := range peers {
+				if err = sendPeerMessage(cfg, target, p); err != nil {
+					logger.With("error", err, "peer_id", p.ID).Error("failed to send peer message")
 				}
 			}
 		}

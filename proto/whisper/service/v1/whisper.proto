@@ -14,6 +14,8 @@ service WhisperService {
   rpc Join(JoinRequest) returns (JoinResponse);
   // Leave the gossip network.
   rpc Leave(LeaveRequest) returns (LeaveResponse);
+  // Describe the status of the gossip network according to this peer
+  rpc Status(StatusRequest) returns (StatusResponse);
 }
 
 // The JoinRequest message describes a peer's intent to join the gossip network.
@@ -36,3 +38,15 @@ message LeaveRequest {
 
 // The LeaveResponse message is returned when a peer has been marked as having left the gossip network.
 message LeaveResponse {}
+
+// The StatusRequest message is used to obtain the current status of the gossip network according to a single
+// peer.
+message StatusRequest {}
+
+// The StatusResponse message describes the current status of the gossip network according to the called peer.
+message StatusResponse {
+  // The peer's own data.
+  whisper.v1.Peer self = 1;
+  // All peers within the gossip network.
+  repeated whisper.v1.Peer peers = 2;
+}

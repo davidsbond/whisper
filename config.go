@@ -1,12 +1,14 @@
 package whisper
 
 import (
+	"context"
 	"crypto/ecdh"
 	"log/slog"
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/davidsbond/whisper/internal/store"
+	"github.com/davidsbond/whisper/pkg/peer"
+	"github.com/davidsbond/whisper/pkg/store"
 )
 
 type (
@@ -21,7 +23,13 @@ type (
 		curve       ecdh.Curve
 		joinAddress string
 		logger      *slog.Logger
-		store       peerStore
+		store       PeerStore
+	}
+
+	PeerStore interface {
+		FindPeer(ctx context.Context, id uint64) (peer.Peer, error)
+		SavePeer(ctx context.Context, peer peer.Peer) error
+		ListPeers(ctx context.Context) ([]peer.Peer, error)
 	}
 )
 
@@ -86,7 +94,7 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
-func WithStore(store peerStore) Option {
+func WithStore(store PeerStore) Option {
 	return func(c *config) {
 		c.store = store
 	}
