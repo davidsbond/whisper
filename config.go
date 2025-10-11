@@ -5,6 +5,7 @@ import (
 	"crypto/ecdh"
 	"log/slog"
 
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/davidsbond/whisper/pkg/peer"
@@ -12,23 +13,30 @@ import (
 )
 
 type (
+	// The Option type is a function that modifies the configuration of the whisper node.
 	Option func(*config)
 
 	config struct {
-		id          uint64
-		address     string
-		port        int
-		key         *ecdh.PrivateKey
-		metadata    proto.Message
-		curve       ecdh.Curve
-		joinAddress string
-		logger      *slog.Logger
-		store       PeerStore
+		id           uint64
+		address      string
+		port         int
+		key          *ecdh.PrivateKey
+		metadata     proto.Message
+		curve        ecdh.Curve
+		joinAddress  string
+		logger       *slog.Logger
+		store        PeerStore
+		interceptors []grpc.UnaryServerInterceptor
 	}
 
+	// The PeerStore interface describes types that can persist peer data.
 	PeerStore interface {
+		// FindPeer should return the peer.Peer whose identifier matches the one provided. It should return
+		// store.ErrPeerNotFound if a matching peer does not exist.
 		FindPeer(ctx context.Context, id uint64) (peer.Peer, error)
+		// SavePeer should persist the given peer.Peer.
 		SavePeer(ctx context.Context, peer peer.Peer) error
+		// ListPeers should return all peers within the store.
 		ListPeers(ctx context.Context) ([]peer.Peer, error)
 	}
 )
@@ -52,56 +60,79 @@ func defaultConfig() *config {
 	}
 }
 
+// WithID modifies the identifier used by the whisper node. This id must be unique per instance.
 func WithID(id uint64) Option {
 	return func(c *config) {
 		c.id = id
 	}
 }
 
+// WithAddress modifies the address that the whisper node will advertise to its peers for TCP/UDP communication. It
+// must be an ip:port combination.
 func WithAddress(address string) Option {
 	return func(c *config) {
 		c.address = address
 	}
 }
 
+// WithPort modifies the port that the whisper node will use for handling TCP and UDP traffic.
 func WithPort(port int) Option {
 	return func(c *config) {
 		c.port = port
 	}
 }
 
+// WithKey modifies the private key the whisper node will use to encrypt UDP packets. By default, each whisper node
+// will generate a new key on startup.
 func WithKey(key *ecdh.PrivateKey) Option {
 	return func(c *config) {
 		c.key = key
 	}
 }
 
+// WithMetadata specifies an arbitrary proto.Message implementation that can be set as metadata. This metadata is
+// shared with peers in the gossip network. Important to note that you will get errors if not all peers have the
+// proto.Message's concrete implementation within their compiled binary.
 func WithMetadata(metadata proto.Message) Option {
 	return func(c *config) {
 		c.metadata = metadata
 	}
 }
 
+// WithCurve modifies the ecdh.Curve implementation to use for handling public and private keys.
 func WithCurve(curve ecdh.Curve) Option {
 	return func(c *config) {
 		c.curve = curve
 	}
 }
 
+// WithLogger modifies the logger used by the whisper node. Logs aim to be reasonable and most are at the DEBUG
+// level.
 func WithLogger(logger *slog.Logger) Option {
 	return func(c *config) {
 		c.logger = logger
 	}
 }
 
+// WithStore modifies the PeerStore implementation used by the whisper node to persist peer data. By default, an
+// in-memory store is used, leading to a blank state on subsequent startups.
 func WithStore(store PeerStore) Option {
 	return func(c *config) {
 		c.store = store
 	}
 }
 
+// WithJoinAddress specifies a peer that should be contacted on startup to advertise this whisper node to the network
+// and perform an initial sync of available peers.
 func WithJoinAddress(joinAddress string) Option {
 	return func(c *config) {
 		c.joinAddress = joinAddress
+	}
+}
+
+// WithInterceptors modifies gRPC interceptors used by the gRPC server. This function performs appends.
+func WithInterceptors(interceptors ...grpc.UnaryServerInterceptor) Option {
+	return func(c *config) {
+		c.interceptors = append(c.interceptors, interceptors...)
 	}
 }

@@ -1,6 +1,14 @@
 //go:generate go tool buf format -w
 //go:generate go tool buf generate
 
+// Package whisper provides a zero-trust, gRPC-based gossip protocol. Each peer within the network advertises itself
+// to others, periodically sending updates about its current view of the network to others via UDP. All peer data sent
+// via UDP is encrypted using Diffie-Hellman. Once two peers become aware of each other's public keys, they can derive
+// secrets and share information.
+//
+// A peer optionally joins an existing network on start. This is managed via TCP. Upon acceptance, the peer they
+// joined via will provide its current state of the gossip network so that the new peer can derive secrets for
+// all others.
 package whisper
 
 import (
@@ -29,6 +37,7 @@ import (
 	"github.com/davidsbond/whisper/pkg/store"
 )
 
+// Run a whisper node.
 func Run(ctx context.Context, options ...Option) error {
 	cfg := defaultConfig()
 	for _, opt := range options {
@@ -109,6 +118,8 @@ func bootstrap(ctx context.Context, cfg *config) error {
 }
 
 func join(ctx context.Context, cfg *config, self peer.Peer) error {
+	cfg.logger.With("address", cfg.address).Info("joining gossip network")
+
 	client, closer, err := dialPeer(cfg.joinAddress)
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
@@ -169,6 +180,7 @@ func join(ctx context.Context, cfg *config, self peer.Peer) error {
 
 func leave(cfg *config) error {
 	cfg.logger.Debug("leaving gossip network")
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
@@ -213,7 +225,10 @@ func listenTCP(ctx context.Context, cfg *config) error {
 		return fmt.Errorf("failed to listen on port %d: %w", cfg.port, err)
 	}
 
-	server := grpc.NewServer()
+	server := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(cfg.interceptors...),
+	)
+
 	service.New(cfg.id, cfg.store, cfg.curve).Register(server)
 
 	group, ctx := errgroup.WithContext(ctx)
@@ -478,7 +493,8 @@ func gossip(ctx context.Context, cfg *config) error {
 				continue
 			}
 
-			if len(peers) == 0 {
+			// If we only have one peer, we're a standalone node.
+			if len(peers) <= 1 {
 				continue
 			}
 
@@ -496,6 +512,12 @@ func gossip(ctx context.Context, cfg *config) error {
 			logger := cfg.logger.With("target_id", target.ID)
 
 			for _, p := range peers {
+				if p.ID == target.ID {
+					// Don't tell peers about themselves, each peer owns its own state except in the scenario where
+					// one is leaving. But if it's leaving, it won't care for more updates.
+					continue
+				}
+
 				if err = sendPeerMessage(cfg, target, p); err != nil {
 					logger.With("error", err, "peer_id", p.ID).Error("failed to send peer message")
 				}
