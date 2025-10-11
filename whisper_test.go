@@ -2,73 +2,66 @@ package whisper_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
 
-	"github.com/davidsbond/whisper"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/davidsbond/whisper"
 )
 
-func TestThing(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), time.Minute*2)
+func TestWhisper_Run(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	n1 := whisper.New(1, whisper.WithPort(8000), whisper.WithAddress("0.0.0.0:8000"), whisper.WithLogger(testLogger(t)))
-	n2 := whisper.New(2, whisper.WithPort(8001), whisper.WithAddress("0.0.0.0:8001"), whisper.WithLogger(testLogger(t)))
-	n3 := whisper.New(3, whisper.WithPort(8002), whisper.WithAddress("0.0.0.0:8002"), whisper.WithLogger(testLogger(t)))
+	logger := slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{
+		AddSource: true,
+		Level:     slog.LevelDebug,
+	}))
 
 	group, ctx := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		return n1.Start(ctx)
-	})
-	group.Go(func() error {
-		for event := range n1.Events() {
-			t.Logf("1: got event (%v) for peer %d", event.Type, event.Peer.ID)
-		}
-
-		return nil
+		return whisper.Run(ctx,
+			whisper.WithID(1),
+			whisper.WithLogger(logger),
+		)
 	})
 
 	group.Go(func() error {
 		<-time.After(time.Second * 5)
-		return n2.Join(ctx, "0.0.0.0:8000")
-	})
-	group.Go(func() error {
-		for event := range n2.Events() {
-			t.Logf("2: got event (%v) for peer %d", event.Type, event.Peer.ID)
-		}
-
-		return nil
+		return whisper.Run(ctx,
+			whisper.WithID(2),
+			whisper.WithLogger(logger),
+			whisper.WithPort(8001),
+			whisper.WithAddress("0.0.0.0:8001"),
+			whisper.WithJoinAddress("0.0.0.0:8000"),
+		)
 	})
 
 	group.Go(func() error {
 		<-time.After(time.Second * 10)
-		return n3.Join(ctx, "0.0.0.0:8000")
-	})
-	group.Go(func() error {
-		for event := range n3.Events() {
-			t.Logf("3: got event (%v) for peer %d", event.Type, event.Peer.ID)
+
+		// Make this peer leave after 1 minute.
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute/2)
+		defer cancel()
+
+		err := whisper.Run(ctx,
+			whisper.WithID(3),
+			whisper.WithLogger(logger),
+			whisper.WithPort(8002),
+			whisper.WithAddress("0.0.0.0:8002"),
+			whisper.WithJoinAddress("0.0.0.0:8001"),
+		)
+
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil
 		}
 
-		return nil
+		return err
 	})
 
-	<-time.After(time.Second * 30)
-	n1.SetMetadata(t.Context(), []byte("hello world"))
-	n2.SetMetadata(t.Context(), []byte("hello world"))
-	n3.SetMetadata(t.Context(), []byte("hello world"))
-
-	if err := group.Wait(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func testLogger(t *testing.T) *slog.Logger {
-	t.Helper()
-
-	return slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{
-		AddSource: true,
-		Level:     slog.LevelDebug,
-	}))
+	assert.NoError(t, group.Wait())
 }

@@ -3,46 +3,97 @@ package whisper
 import (
 	"crypto/ecdh"
 	"log/slog"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/davidsbond/whisper/internal/store"
 )
 
 type (
-	NodeOption func(*nodeConfig)
+	Option func(*config)
 
-	nodeConfig struct {
-		port     int
-		logger   *slog.Logger
-		store    PeerStore
-		curve    ecdh.Curve
-		key      *ecdh.PrivateKey
-		address  string
-		metadata []byte
+	config struct {
+		id          uint64
+		address     string
+		port        int
+		key         *ecdh.PrivateKey
+		metadata    proto.Message
+		curve       ecdh.Curve
+		joinAddress string
+		logger      *slog.Logger
+		store       peerStore
 	}
 )
 
-func defaultNodeConfig() *nodeConfig {
-	return &nodeConfig{
-		port:    8000,
-		logger:  slog.Default().WithGroup("whisper"),
-		store:   NewInMemoryPeerStore(),
-		curve:   ecdh.X25519(),
+func defaultConfig() *config {
+	return &config{
+		// We'll serve TCP/UDP on port 8000 and inform other peers we do so.
 		address: "0.0.0.0:8000",
+		port:    8000,
+		// A key will be generated if one is not set.
+		key: nil,
+		// No default metadata.
+		metadata: nil,
+		// We'll use X25519 for key generation/parsing if unspecified.
+		curve: ecdh.X25519(),
+		// By default, the whisper node is standalone.
+		joinAddress: "",
+		logger:      slog.Default(),
+		// By default, all peer data is stored in-memory
+		store: store.NewInMemoryStore(),
 	}
 }
 
-func WithPort(port int) NodeOption {
-	return func(config *nodeConfig) {
-		config.port = port
+func WithID(id uint64) Option {
+	return func(c *config) {
+		c.id = id
 	}
 }
 
-func WithAddress(address string) NodeOption {
-	return func(config *nodeConfig) {
-		config.address = address
+func WithAddress(address string) Option {
+	return func(c *config) {
+		c.address = address
 	}
 }
 
-func WithLogger(logger *slog.Logger) NodeOption {
-	return func(config *nodeConfig) {
-		config.logger = logger
+func WithPort(port int) Option {
+	return func(c *config) {
+		c.port = port
+	}
+}
+
+func WithKey(key *ecdh.PrivateKey) Option {
+	return func(c *config) {
+		c.key = key
+	}
+}
+
+func WithMetadata(metadata proto.Message) Option {
+	return func(c *config) {
+		c.metadata = metadata
+	}
+}
+
+func WithCurve(curve ecdh.Curve) Option {
+	return func(c *config) {
+		c.curve = curve
+	}
+}
+
+func WithLogger(logger *slog.Logger) Option {
+	return func(c *config) {
+		c.logger = logger
+	}
+}
+
+func WithStore(store peerStore) Option {
+	return func(c *config) {
+		c.store = store
+	}
+}
+
+func WithJoinAddress(joinAddress string) Option {
+	return func(c *config) {
+		c.joinAddress = joinAddress
 	}
 }

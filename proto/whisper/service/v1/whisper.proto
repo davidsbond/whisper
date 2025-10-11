@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+// Package whisper.service.v1 provides the gRPC service used for joining and leaving the gossip network.
+package whisper.service.v1;
+
+import "whisper/v1/whisper.proto";
+
+option go_package = "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1;whispersvcv1";
+
+// The WhisperService service is used for the non-UDP portions of the gossip protocol. Primarily for peers to inform
+// others of their intent of join or leave the gossip network.
+service WhisperService {
+  // Join the gossip network.
+  rpc Join(JoinRequest) returns (JoinResponse);
+  // Leave the gossip network.
+  rpc Leave(LeaveRequest) returns (LeaveResponse);
+}
+
+// The JoinRequest message describes a peer's intent to join the gossip network.
+message JoinRequest {
+  // The peer that wishes to join the network.
+  whisper.v1.Peer peer = 1;
+}
+
+// The JoinResponse message is returned when a peer has been accepted into the gossip network.
+message JoinResponse {
+  // The current state of the gossip network as known to the peer that handled the join request.
+  repeated whisper.v1.Peer peers = 1;
+}
+
+// The LeaveRequest message describes a peer's intent to leave the gossip network.
+message LeaveRequest {
+  // The peer's unique identifier.
+  uint64 id = 1;
+}
+
+// The LeaveResponse message is returned when a peer has been marked as having left the gossip network.
+message LeaveResponse {}

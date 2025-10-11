@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+// Package whisper.v1 contains types used by the whisper protocol to describe the state of peers within the gossip
+// network.
+package whisper.v1;
+
+import "google/protobuf/any.proto";
+
+option go_package = "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1;whisperv1";
+
+// The Peer type represents a single peer within the gossip ,network.
+message Peer {
+  // The peer's unique identifier.
+  uint64 id = 1;
+  // The address advertised to the peer for gossip-based communications.
+  string address = 2;
+  // The public key of the peer used to decrypt peer messages.
+  bytes public_key = 3;
+  // A value indicating the freshness of this peer data, should be increased when the peer's metadata is
+  // modified.
+  int64 delta = 4;
+  // Arbitrary metadata for the peer, described using any protobuf message defined by the user.
+  google.protobuf.Any metadata = 5;
+  // The current status of the peer.
+  PeerStatus status = 6;
+}
+
+// The PeerStatus enumeration contains values describing the different states of a peer.
+enum PeerStatus {
+  // PEER_STATUS_UNSPECIFIED is used as the default value, where no status has been set. This should be invalid in
+  // all cases where it is encountered.
+  PEER_STATUS_UNSPECIFIED = 0;
+  // PEER_STATUS_JOINING denotes that a peer is joining the gossip network and may not have yet received any peer
+  // data.
+  PEER_STATUS_JOINING = 1;
+  // PEER_STATUS_JOINED denotes that a peer has successfully joined the gossip network and is sharing data among
+  // peers.
+  PEER_STATUS_JOINED = 2;
+  // PEER_STATUS_LEFT denotes that a peer has left the gossip network and should not be contacted for further updates.
+  PEER_STATUS_LEFT = 3;
+  // PEER_STATUS_GONE denotes that a peer has not sent an update to another peer in a large enough period of time to
+  // be considered offline.
+  PEER_STATUS_GONE = 4;
+}
+
+// The PeerMessage type is sent from peer to peer via UDP and contains encrypted data on a single peer within
+// the gossip network.
+message PeerMessage {
+  // The unique identifier of the peer sending this message. This value should be used to look-up a public key
+  // from which a shared secret can be derived.
+  uint64 source_id = 1;
+  // The nonce used when encrypting the Peer's data.
+  bytes nonce = 2;
+  // The encrypted, protobuf-encoded Peer.
+  bytes ciphertext = 3;
+}
