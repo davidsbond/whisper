@@ -65,10 +65,6 @@ func (s *InMemoryStore) ListPeers(ctx context.Context) ([]peer.Peer, error) {
 	peers := slices.Collect(maps.Values(s.peers))
 
 	slices.SortFunc(peers, func(a, b peer.Peer) int {
-		if a.ID == b.ID {
-			return 0
-		}
-
 		if a.ID < b.ID {
 			return -1
 		}

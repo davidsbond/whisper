@@ -292,6 +292,86 @@ func (x *StatusResponse) GetPeers() []*v1.Peer {
 	return nil
 }
 
+type CheckRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CheckRequest) Reset() {
+	*x = CheckRequest{}
+	mi := &file_whisper_service_v1_whisper_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CheckRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CheckRequest) ProtoMessage() {}
+
+func (x *CheckRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_whisper_service_v1_whisper_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CheckRequest.ProtoReflect.Descriptor instead.
+func (*CheckRequest) Descriptor() ([]byte, []int) {
+	return file_whisper_service_v1_whisper_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *CheckRequest) GetId() uint64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+type CheckResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CheckResponse) Reset() {
+	*x = CheckResponse{}
+	mi := &file_whisper_service_v1_whisper_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CheckResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CheckResponse) ProtoMessage() {}
+
+func (x *CheckResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_whisper_service_v1_whisper_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CheckResponse.ProtoReflect.Descriptor instead.
+func (*CheckResponse) Descriptor() ([]byte, []int) {
+	return file_whisper_service_v1_whisper_proto_rawDescGZIP(), []int{7}
+}
+
 var File_whisper_service_v1_whisper_proto protoreflect.FileDescriptor
 
 const file_whisper_service_v1_whisper_proto_rawDesc = "" +
@@ -307,11 +387,15 @@ const file_whisper_service_v1_whisper_proto_rawDesc = "" +
 	"\rStatusRequest\"^\n" +
 	"\x0eStatusResponse\x12$\n" +
 	"\x04self\x18\x01 \x01(\v2\x10.whisper.v1.PeerR\x04self\x12&\n" +
-	"\x05peers\x18\x02 \x03(\v2\x10.whisper.v1.PeerR\x05peers2\xfa\x01\n" +
+	"\x05peers\x18\x02 \x03(\v2\x10.whisper.v1.PeerR\x05peers\"\x1e\n" +
+	"\fCheckRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x04R\x02id\"\x0f\n" +
+	"\rCheckResponse2\xc8\x02\n" +
 	"\x0eWhisperService\x12I\n" +
 	"\x04Join\x12\x1f.whisper.service.v1.JoinRequest\x1a .whisper.service.v1.JoinResponse\x12L\n" +
 	"\x05Leave\x12 .whisper.service.v1.LeaveRequest\x1a!.whisper.service.v1.LeaveResponse\x12O\n" +
-	"\x06Status\x12!.whisper.service.v1.StatusRequest\x1a\".whisper.service.v1.StatusResponseBXZVgithub.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1;whispersvcv1b\x06proto3"
+	"\x06Status\x12!.whisper.service.v1.StatusRequest\x1a\".whisper.service.v1.StatusResponse\x12L\n" +
+	"\x05Check\x12 .whisper.service.v1.CheckRequest\x1a!.whisper.service.v1.CheckResponseBXZVgithub.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1;whispersvcv1b\x06proto3"
 
 var (
 	file_whisper_service_v1_whisper_proto_rawDescOnce sync.Once
@@ -325,7 +409,7 @@ func file_whisper_service_v1_whisper_proto_rawDescGZIP() []byte {
 	return file_whisper_service_v1_whisper_proto_rawDescData
 }
 
-var file_whisper_service_v1_whisper_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_whisper_service_v1_whisper_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_whisper_service_v1_whisper_proto_goTypes = []any{
 	(*JoinRequest)(nil),    // 0: whisper.service.v1.JoinRequest
 	(*JoinResponse)(nil),   // 1: whisper.service.v1.JoinResponse
@@ -333,21 +417,25 @@ var file_whisper_service_v1_whisper_proto_goTypes = []any{
 	(*LeaveResponse)(nil),  // 3: whisper.service.v1.LeaveResponse
 	(*StatusRequest)(nil),  // 4: whisper.service.v1.StatusRequest
 	(*StatusResponse)(nil), // 5: whisper.service.v1.StatusResponse
-	(*v1.Peer)(nil),        // 6: whisper.v1.Peer
+	(*CheckRequest)(nil),   // 6: whisper.service.v1.CheckRequest
+	(*CheckResponse)(nil),  // 7: whisper.service.v1.CheckResponse
+	(*v1.Peer)(nil),        // 8: whisper.v1.Peer
 }
 var file_whisper_service_v1_whisper_proto_depIdxs = []int32{
-	6, // 0: whisper.service.v1.JoinRequest.peer:type_name -> whisper.v1.Peer
-	6, // 1: whisper.service.v1.JoinResponse.peers:type_name -> whisper.v1.Peer
-	6, // 2: whisper.service.v1.StatusResponse.self:type_name -> whisper.v1.Peer
-	6, // 3: whisper.service.v1.StatusResponse.peers:type_name -> whisper.v1.Peer
+	8, // 0: whisper.service.v1.JoinRequest.peer:type_name -> whisper.v1.Peer
+	8, // 1: whisper.service.v1.JoinResponse.peers:type_name -> whisper.v1.Peer
+	8, // 2: whisper.service.v1.StatusResponse.self:type_name -> whisper.v1.Peer
+	8, // 3: whisper.service.v1.StatusResponse.peers:type_name -> whisper.v1.Peer
 	0, // 4: whisper.service.v1.WhisperService.Join:input_type -> whisper.service.v1.JoinRequest
 	2, // 5: whisper.service.v1.WhisperService.Leave:input_type -> whisper.service.v1.LeaveRequest
 	4, // 6: whisper.service.v1.WhisperService.Status:input_type -> whisper.service.v1.StatusRequest
-	1, // 7: whisper.service.v1.WhisperService.Join:output_type -> whisper.service.v1.JoinResponse
-	3, // 8: whisper.service.v1.WhisperService.Leave:output_type -> whisper.service.v1.LeaveResponse
-	5, // 9: whisper.service.v1.WhisperService.Status:output_type -> whisper.service.v1.StatusResponse
-	7, // [7:10] is the sub-list for method output_type
-	4, // [4:7] is the sub-list for method input_type
+	6, // 7: whisper.service.v1.WhisperService.Check:input_type -> whisper.service.v1.CheckRequest
+	1, // 8: whisper.service.v1.WhisperService.Join:output_type -> whisper.service.v1.JoinResponse
+	3, // 9: whisper.service.v1.WhisperService.Leave:output_type -> whisper.service.v1.LeaveResponse
+	5, // 10: whisper.service.v1.WhisperService.Status:output_type -> whisper.service.v1.StatusResponse
+	7, // 11: whisper.service.v1.WhisperService.Check:output_type -> whisper.service.v1.CheckResponse
+	8, // [8:12] is the sub-list for method output_type
+	4, // [4:8] is the sub-list for method input_type
 	4, // [4:4] is the sub-list for extension type_name
 	4, // [4:4] is the sub-list for extension extendee
 	0, // [0:4] is the sub-list for field type_name
@@ -364,7 +452,7 @@ func file_whisper_service_v1_whisper_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_whisper_service_v1_whisper_proto_rawDesc), len(file_whisper_service_v1_whisper_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

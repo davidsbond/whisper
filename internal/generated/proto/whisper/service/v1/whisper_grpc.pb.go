@@ -24,6 +24,7 @@ const (
 	WhisperService_Join_FullMethodName   = "/whisper.service.v1.WhisperService/Join"
 	WhisperService_Leave_FullMethodName  = "/whisper.service.v1.WhisperService/Leave"
 	WhisperService_Status_FullMethodName = "/whisper.service.v1.WhisperService/Status"
+	WhisperService_Check_FullMethodName  = "/whisper.service.v1.WhisperService/Check"
 )
 
 // WhisperServiceClient is the client API for WhisperService service.
@@ -39,6 +40,8 @@ type WhisperServiceClient interface {
 	Leave(ctx context.Context, in *LeaveRequest, opts ...grpc.CallOption) (*LeaveResponse, error)
 	// Describe the status of the gossip network according to this peer
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
+	// Check if a specified peer is reachable from this peer.
+	Check(ctx context.Context, in *CheckRequest, opts ...grpc.CallOption) (*CheckResponse, error)
 }
 
 type whisperServiceClient struct {
@@ -79,6 +82,16 @@ func (c *whisperServiceClient) Status(ctx context.Context, in *StatusRequest, op
 	return out, nil
 }
 
+func (c *whisperServiceClient) Check(ctx context.Context, in *CheckRequest, opts ...grpc.CallOption) (*CheckResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckResponse)
+	err := c.cc.Invoke(ctx, WhisperService_Check_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // WhisperServiceServer is the server API for WhisperService service.
 // All implementations must embed UnimplementedWhisperServiceServer
 // for forward compatibility.
@@ -92,6 +105,8 @@ type WhisperServiceServer interface {
 	Leave(context.Context, *LeaveRequest) (*LeaveResponse, error)
 	// Describe the status of the gossip network according to this peer
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
+	// Check if a specified peer is reachable from this peer.
+	Check(context.Context, *CheckRequest) (*CheckResponse, error)
 	mustEmbedUnimplementedWhisperServiceServer()
 }
 
@@ -110,6 +125,9 @@ func (UnimplementedWhisperServiceServer) Leave(context.Context, *LeaveRequest) (
 }
 func (UnimplementedWhisperServiceServer) Status(context.Context, *StatusRequest) (*StatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Status not implemented")
+}
+func (UnimplementedWhisperServiceServer) Check(context.Context, *CheckRequest) (*CheckResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Check not implemented")
 }
 func (UnimplementedWhisperServiceServer) mustEmbedUnimplementedWhisperServiceServer() {}
 func (UnimplementedWhisperServiceServer) testEmbeddedByValue()                        {}
@@ -186,6 +204,24 @@ func _WhisperService_Status_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WhisperService_Check_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WhisperServiceServer).Check(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WhisperService_Check_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WhisperServiceServer).Check(ctx, req.(*CheckRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WhisperService_ServiceDesc is the grpc.ServiceDesc for WhisperService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -204,6 +240,10 @@ var WhisperService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Status",
 			Handler:    _WhisperService_Status_Handler,
+		},
+		{
+			MethodName: "Check",
+			Handler:    _WhisperService_Check_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

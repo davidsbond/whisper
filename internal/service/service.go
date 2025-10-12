@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -129,6 +130,31 @@ func (svc *Service) Join(ctx context.Context, r *whispersvcv1.JoinRequest) (*whi
 	return response, nil
 }
 
+func (svc *Service) validateJoinRequest(r *whispersvcv1.JoinRequest) error {
+	if r.GetPeer() == nil {
+		return errors.New("no peer specified")
+	}
+
+	p := r.GetPeer()
+	if p.GetAddress() == "" {
+		return errors.New("no peer address specified")
+	}
+
+	if _, err := netip.ParseAddrPort(p.GetAddress()); err != nil {
+		return fmt.Errorf("invalid peer address %q: %w", p.GetAddress(), err)
+	}
+
+	if len(p.GetPublicKey()) == 0 {
+		return errors.New("no peer public key specified")
+	}
+
+	if p.GetStatus() != whisperv1.PeerStatus_PEER_STATUS_JOINING {
+		return fmt.Errorf("invalid peer status: %v", p.GetStatus())
+	}
+
+	return nil
+}
+
 // Leave handles an inbound gRPC request from a peer wishing to leave the gossip network. This peer must have a record
 // of the calling peer for the call to succeed. On success, this peer updates its local state for the calling peer
 // with a "left" status which will be propagated out to the rest of the network.
@@ -191,27 +217,47 @@ func (svc *Service) Status(ctx context.Context, _ *whispersvcv1.StatusRequest) (
 	return response, nil
 }
 
-func (svc *Service) validateJoinRequest(r *whispersvcv1.JoinRequest) error {
-	if r.GetPeer() == nil {
-		return errors.New("no peer specified")
+// Check is called by a peer when it detects a possible failure of another peer within the gossip network. This call
+// will attempt to reach out to the specified peer and report if it is accessible. This is used to verify a peer is
+// not available from more than one peer.
+//
+// Verification is performed by calling the Status endpoint of the desired peer.
+func (svc *Service) Check(ctx context.Context, r *whispersvcv1.CheckRequest) (*whispersvcv1.CheckResponse, error) {
+	target, err := svc.peers.FindPeer(ctx, r.GetId())
+	switch {
+	case errors.Is(err, store.ErrPeerNotFound):
+		return nil, status.Errorf(codes.NotFound, "peer %q not found", r.GetId())
+	case err != nil:
+		return nil, status.Errorf(codes.Internal, "failed to lookup peer %q: %v", r.GetId(), err)
 	}
 
-	p := r.GetPeer()
-	if p.GetAddress() == "" {
-		return errors.New("no peer address specified")
+	if target.Status == peer.StatusLeft || target.Status == peer.StatusGone {
+		// If the specified peer has left, or we already know it has failed, it could be the state on the caller has
+		// not yet been updated to reflect this, so we tell the caller that no further action is required.
+		return nil, status.Errorf(codes.FailedPrecondition, "peer %q is in status: %v", r.GetId(), target.Status)
 	}
 
-	if _, err := netip.ParseAddrPort(p.GetAddress()); err != nil {
-		return fmt.Errorf("invalid peer address %q: %w", p.GetAddress(), err)
+	client, closer, err := dialPeer(target.Address)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to dial peer %q: %v", target.ID, err)
 	}
 
-	if len(p.GetPublicKey()) == 0 {
-		return errors.New("no peer public key specified")
+	defer closer()
+	if _, err = client.Status(ctx, &whispersvcv1.StatusRequest{}); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to dial peer %q: %v", target.ID, err)
 	}
 
-	if p.GetStatus() != whisperv1.PeerStatus_PEER_STATUS_JOINING {
-		return fmt.Errorf("invalid peer status: %v", p.GetStatus())
+	return &whispersvcv1.CheckResponse{}, nil
+}
+
+func dialPeer(address string) (whispersvcv1.WhisperServiceClient, func(), error) {
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create grpc client: %w", err)
 	}
 
-	return nil
+	client := whispersvcv1.NewWhisperServiceClient(conn)
+	return client, func() {
+		conn.Close()
+	}, nil
 }

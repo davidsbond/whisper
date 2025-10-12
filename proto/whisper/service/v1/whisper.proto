@@ -16,6 +16,8 @@ service WhisperService {
   rpc Leave(LeaveRequest) returns (LeaveResponse);
   // Describe the status of the gossip network according to this peer
   rpc Status(StatusRequest) returns (StatusResponse);
+  // Check if a specified peer is reachable from this peer.
+  rpc Check(CheckRequest) returns (CheckResponse);
 }
 
 // The JoinRequest message describes a peer's intent to join the gossip network.
@@ -50,3 +52,9 @@ message StatusResponse {
   // All peers within the gossip network.
   repeated whisper.v1.Peer peers = 2;
 }
+
+message CheckRequest {
+  uint64 id = 1;
+}
+
+message CheckResponse {}

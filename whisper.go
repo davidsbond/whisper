@@ -26,7 +26,9 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -152,7 +154,7 @@ func join(ctx context.Context, cfg *config, self peer.Peer) error {
 	for _, protoPeer := range response.GetPeers() {
 		publicKey, err := cfg.curve.NewPublicKey(protoPeer.GetPublicKey())
 		if err != nil {
-			return fmt.Errorf("failed to parse public key for peer %d: %w", protoPeer.GetId(), err)
+			return fmt.Errorf("failed to parse public key for peer %q: %w", protoPeer.GetId(), err)
 		}
 
 		p := peer.Peer{
@@ -166,7 +168,7 @@ func join(ctx context.Context, cfg *config, self peer.Peer) error {
 		if protoPeer.GetMetadata() != nil {
 			p.Metadata, err = protoPeer.GetMetadata().UnmarshalNew()
 			if err != nil {
-				return fmt.Errorf("failed to unmarshal metadata for peer %d: %w", protoPeer.GetId(), err)
+				return fmt.Errorf("failed to unmarshal metadata for peer %q: %w", protoPeer.GetId(), err)
 			}
 		}
 
@@ -479,51 +481,169 @@ func encryptPeer(cfg *config, target, peer peer.Peer) (nonce, ciphertext []byte,
 }
 
 func gossip(ctx context.Context, cfg *config) error {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	stateTicker := time.NewTicker(time.Second)
+	defer stateTicker.Stop()
+
+	checkTicker := time.NewTicker(time.Minute)
+	defer checkTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
-			peers, err := cfg.store.ListPeers(ctx)
-			if err != nil {
-				cfg.logger.With("error", err).Error("failed to list peers")
-				continue
+		case <-stateTicker.C:
+			if err := shareState(ctx, cfg); err != nil {
+				cfg.logger.With("error", err).Error("failed to share state")
 			}
-
-			// If we only have one peer, we're a standalone node.
-			if len(peers) <= 1 {
-				continue
-			}
-
-			idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(peers))))
-			if err != nil {
-				cfg.logger.With("error", err).Error("failed to select peer")
-				continue
-			}
-
-			target := peers[idx.Int64()]
-			if target.ID == cfg.id || target.Status != peer.StatusJoined {
-				continue
-			}
-
-			logger := cfg.logger.With("target_id", target.ID)
-
-			for _, p := range peers {
-				if p.ID == target.ID {
-					// Don't tell peers about themselves, each peer owns its own state except in the scenario where
-					// one is leaving. But if it's leaving, it won't care for more updates.
-					continue
-				}
-
-				if err = sendPeerMessage(cfg, target, p); err != nil {
-					logger.With("error", err, "peer_id", p.ID).Error("failed to send peer message")
-				}
+		case <-checkTicker.C:
+			if err := checkPeer(ctx, cfg); err != nil {
+				cfg.logger.With("error", err).Error("failed to check peer")
 			}
 		}
 	}
+}
+
+func shareState(ctx context.Context, cfg *config) error {
+	target, err := selectPeer(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to select peer: %w", err)
+	}
+
+	if target.IsEmpty() {
+		return nil
+	}
+
+	peers, err := cfg.store.ListPeers(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list peers: %w", err)
+	}
+
+	for _, p := range peers {
+		if p.ID == target.ID {
+			// Don't tell peers about themselves, each peer owns its own state except in the scenario where
+			// one is leaving. But if it's leaving, it won't care for more updates.
+			continue
+		}
+
+		if err = sendPeerMessage(cfg, target, p); err != nil {
+			return fmt.Errorf("failed to send peer message to peer %q: %w", target.ID, err)
+		}
+	}
+
+	return nil
+}
+
+func checkPeer(ctx context.Context, cfg *config) error {
+	target, err := selectPeer(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to select peer: %w", err)
+	}
+
+	if target.IsEmpty() {
+		return nil
+	}
+
+	client, closer, err := dialPeer(target.Address)
+	if err != nil {
+		if err = checkPeerViaPeer(ctx, cfg, target); err != nil {
+			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
+		}
+	}
+
+	defer closer()
+	if _, err = client.Status(ctx, &whispersvcv1.StatusRequest{}); err != nil {
+		if err = checkPeerViaPeer(ctx, cfg, target); err != nil {
+			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
+		}
+	}
+
+	return nil
+}
+
+func checkPeerViaPeer(ctx context.Context, cfg *config, target peer.Peer) error {
+	var selected peer.Peer
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			checker, err := selectPeer(ctx, cfg)
+			if err != nil {
+				return fmt.Errorf("failed to select peer: %w", err)
+			}
+
+			if checker.ID == target.ID {
+				continue
+			}
+
+			selected = checker
+		}
+
+		break
+	}
+
+	cfg.logger.With("target_id", target.ID, "checking_id", selected.ID).Info("checking peer liveness via peer")
+
+	client, closer, err := dialPeer(selected.Address)
+	if err != nil {
+		return fmt.Errorf("failed to dial peer: %w", err)
+	}
+
+	defer closer()
+	_, err = client.Check(ctx, &whispersvcv1.CheckRequest{Id: target.ID})
+	switch status.Code(err) {
+	case codes.OK, codes.FailedPrecondition:
+		// We'll get a FailedPrecondition if the target peer has already left or marked as failed within the
+		// selected peer's state.
+		return nil
+	case codes.NotFound:
+		// The peer we called doesn't have the target peer in their state, try another peer
+		return checkPeerViaPeer(ctx, cfg, target)
+	default:
+		if err = markPeerGone(ctx, cfg, target); err != nil {
+			return fmt.Errorf("failed to mark peer %q as gone: %w", target.ID, err)
+		}
+	}
+
+	return nil
+}
+
+func markPeerGone(ctx context.Context, cfg *config, target peer.Peer) error {
+	target.Status = peer.StatusGone
+	target.Delta = time.Now().Unix()
+
+	if err := cfg.store.SavePeer(ctx, target); err != nil {
+		return fmt.Errorf("failed to save peer: %w", err)
+	}
+
+	return nil
+}
+
+func selectPeer(ctx context.Context, cfg *config) (peer.Peer, error) {
+	peers, err := cfg.store.ListPeers(ctx)
+	if err != nil {
+		return peer.Peer{}, err
+	}
+
+	// If we only have one peer, we're a standalone node.
+	if len(peers) <= 1 {
+		return peer.Peer{}, nil
+	}
+
+	idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(peers))))
+	if err != nil {
+		return peer.Peer{}, err
+	}
+
+	target := peers[idx.Int64()]
+
+	// We never want to select ourselves or a peer with an inactive status.
+	if target.ID == cfg.id || target.Status != peer.StatusJoined {
+		return selectPeer(ctx, cfg)
+	}
+
+	return target, nil
 }
 
 func dialPeer(address string) (whispersvcv1.WhisperServiceClient, func(), error) {
