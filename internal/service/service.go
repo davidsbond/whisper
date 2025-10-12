@@ -11,7 +11,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -237,7 +236,7 @@ func (svc *Service) Check(ctx context.Context, r *whispersvcv1.CheckRequest) (*w
 		return nil, status.Errorf(codes.FailedPrecondition, "peer %q is in status: %v", r.GetId(), target.Status)
 	}
 
-	client, closer, err := dialPeer(target.Address)
+	client, closer, err := peer.Dial(target.Address)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to dial peer %q: %v", target.ID, err)
 	}
@@ -248,16 +247,4 @@ func (svc *Service) Check(ctx context.Context, r *whispersvcv1.CheckRequest) (*w
 	}
 
 	return &whispersvcv1.CheckResponse{}, nil
-}
-
-func dialPeer(address string) (whispersvcv1.WhisperServiceClient, func(), error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create grpc client: %w", err)
-	}
-
-	client := whispersvcv1.NewWhisperServiceClient(conn)
-	return client, func() {
-		conn.Close()
-	}, nil
 }

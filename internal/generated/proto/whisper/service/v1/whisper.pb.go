@@ -292,9 +292,11 @@ func (x *StatusResponse) GetPeers() []*v1.Peer {
 	return nil
 }
 
+// The CheckRequest message is used to check if a peer is available from a different peer.
 type CheckRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The identifier of the peer to contact.
+	Id            uint64 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -336,6 +338,7 @@ func (x *CheckRequest) GetId() uint64 {
 	return 0
 }
 
+// The CheckResponse message is returned when a specified peer is reachable from the current peer.
 type CheckResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields

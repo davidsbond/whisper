@@ -1,7 +1,7 @@
 //go:generate go tool buf format -w
 //go:generate go tool buf generate
 
-// Package whisper provides a zero-trust, gRPC-based gossip protocol. Each peer within the network advertises itself
+// Package whisper provides a gRPC-based gossip protocol. Each peer within the network advertises itself
 // to others, periodically sending updates about its current view of the network to others via UDP. All peer data sent
 // via UDP is encrypted using Diffie-Hellman. Once two peers become aware of each other's public keys, they can derive
 // secrets and share information.
@@ -16,18 +16,20 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/hkdf"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -120,9 +122,9 @@ func bootstrap(ctx context.Context, cfg *config) error {
 }
 
 func join(ctx context.Context, cfg *config, self peer.Peer) error {
-	cfg.logger.With("address", cfg.address).Info("joining gossip network")
+	cfg.logger.With("address", cfg.address).Debug("joining gossip network")
 
-	client, closer, err := dialPeer(cfg.joinAddress)
+	client, closer, err := peer.Dial(cfg.joinAddress)
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
 	}
@@ -186,28 +188,16 @@ func leave(cfg *config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	peers, err := cfg.store.ListPeers(ctx)
+	selected, err := selectPeer(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("failed to list peers: %w", err)
-	}
-
-	var selected peer.Peer
-	for _, p := range peers {
-		if p.ID == cfg.id {
-			continue
-		}
-
-		if p.Status == peer.StatusJoined {
-			selected = p
-			break
-		}
+		return fmt.Errorf("failed to select peer: %w", err)
 	}
 
 	if selected.IsEmpty() {
-		return errors.New("failed to find an active peer to inform for leaving gossip network")
+		return nil
 	}
 
-	client, closer, err := dialPeer(selected.Address)
+	client, closer, err := peer.Dial(selected.Address)
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
 	}
@@ -262,8 +252,13 @@ func listenUDP(ctx context.Context, cfg *config) error {
 
 	cfg.logger.With("port", cfg.port).Debug("serving UDP")
 
-	var group sync.WaitGroup
+	var (
+		netErr net.Error
+		group  sync.WaitGroup
+	)
+
 	defer group.Wait()
+	buf := make([]byte, udpSize)
 
 	for {
 		select {
@@ -271,14 +266,23 @@ func listenUDP(ctx context.Context, cfg *config) error {
 			cfg.logger.Debug("shutting down UDP server")
 			return udp.Close()
 		default:
-			buf := make([]byte, udpSize)
+			if err = udp.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+				cfg.logger.With("error", err).Error("failed to set read deadline")
+				continue
+			}
+
 			length, _, err := udp.ReadFromUDP(buf)
-			if err != nil {
+			switch {
+			case errors.As(err, &netErr) && netErr.Timeout():
+				continue
+			case err != nil:
 				cfg.logger.With("error", err).Error("failed to read UDP packet")
 				continue
 			}
 
-			payload := buf[:length]
+			payload := make([]byte, length)
+			copy(payload, buf[:length])
+
 			group.Add(1)
 			go handlePeerMessage(ctx, &group, cfg, payload)
 		}
@@ -389,7 +393,13 @@ func decryptPeer(cfg *config, source peer.Peer, message *whisperv1.PeerMessage) 
 		return peer.Peer{}, fmt.Errorf("failed to derive shared secret: %w", err)
 	}
 
-	block, err := aes.NewCipher(secret)
+	reader := hkdf.New(sha256.New, secret, nil, []byte("whisper"))
+	key := make([]byte, 32)
+	if _, err = io.ReadFull(reader, key); err != nil {
+		return peer.Peer{}, fmt.Errorf("failed to derive AES key: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return peer.Peer{}, fmt.Errorf("failed to create AES block: %w", err)
 	}
@@ -441,7 +451,13 @@ func encryptPeer(cfg *config, target, peer peer.Peer) (nonce, ciphertext []byte,
 		return nil, nil, fmt.Errorf("failed to derive shared secret: %w", err)
 	}
 
-	block, err := aes.NewCipher(secret)
+	reader := hkdf.New(sha256.New, secret, nil, []byte("whisper"))
+	key := make([]byte, 32)
+	if _, err = io.ReadFull(reader, key); err != nil {
+		return nil, nil, fmt.Errorf("failed to derive AES key: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create AES block: %w", err)
 	}
@@ -543,7 +559,9 @@ func checkPeer(ctx context.Context, cfg *config) error {
 		return nil
 	}
 
-	client, closer, err := dialPeer(target.Address)
+	cfg.logger.With("peer_id", target.ID).Debug("checking peer is reachable")
+
+	client, closer, err := peer.Dial(target.Address)
 	if err != nil {
 		if err = checkPeerViaPeer(ctx, cfg, target); err != nil {
 			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
@@ -583,9 +601,9 @@ func checkPeerViaPeer(ctx context.Context, cfg *config, target peer.Peer) error 
 		break
 	}
 
-	cfg.logger.With("target_id", target.ID, "checking_id", selected.ID).Info("checking peer liveness via peer")
+	cfg.logger.With("target_id", target.ID, "checking_id", selected.ID).Debug("checking peer liveness via peer")
 
-	client, closer, err := dialPeer(selected.Address)
+	client, closer, err := peer.Dial(selected.Address)
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
 	}
@@ -626,8 +644,17 @@ func selectPeer(ctx context.Context, cfg *config) (peer.Peer, error) {
 		return peer.Peer{}, err
 	}
 
+	var availablePeers int
+	for _, p := range peers {
+		if p.ID == cfg.id || p.Status != peer.StatusJoined {
+			continue
+		}
+
+		availablePeers++
+	}
+
 	// If we only have one peer, we're a standalone node.
-	if len(peers) <= 1 {
+	if availablePeers == 0 {
 		return peer.Peer{}, nil
 	}
 
@@ -644,16 +671,4 @@ func selectPeer(ctx context.Context, cfg *config) (peer.Peer, error) {
 	}
 
 	return target, nil
-}
-
-func dialPeer(address string) (whispersvcv1.WhisperServiceClient, func(), error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create grpc client: %w", err)
-	}
-
-	client := whispersvcv1.NewWhisperServiceClient(conn)
-	return client, func() {
-		conn.Close()
-	}, nil
 }

@@ -3,8 +3,13 @@ package peer
 
 import (
 	"crypto/ecdh"
+	"fmt"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
+
+	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
 )
 
 type (
@@ -45,3 +50,17 @@ const (
 	// StatusGone describes a peer that may have failed and is no longer accessible within the gossip network.
 	StatusGone
 )
+
+// Dial the peer at the given address. Returns the client, a closer function and a possible error. The closer function
+// must be called when you are done with the client.
+func Dial(address string) (whispersvcv1.WhisperServiceClient, func(), error) {
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create grpc client: %w", err)
+	}
+
+	client := whispersvcv1.NewWhisperServiceClient(conn)
+	return client, func() {
+		conn.Close()
+	}, nil
+}

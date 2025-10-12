@@ -53,8 +53,11 @@ message StatusResponse {
   repeated whisper.v1.Peer peers = 2;
 }
 
+// The CheckRequest message is used to check if a peer is available from a different peer.
 message CheckRequest {
+  // The identifier of the peer to contact.
   uint64 id = 1;
 }
 
+// The CheckResponse message is returned when a specified peer is reachable from the current peer.
 message CheckResponse {}
