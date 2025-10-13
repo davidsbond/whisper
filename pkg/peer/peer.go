@@ -3,6 +3,7 @@ package peer
 
 import (
 	"crypto/ecdh"
+	"crypto/sha256"
 	"fmt"
 
 	"google.golang.org/grpc"
@@ -10,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
+	whisperv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1"
 )
 
 type (
@@ -27,16 +29,48 @@ type (
 		PublicKey *ecdh.PublicKey
 		// Arbitrary metadata advertised by the peer.
 		Metadata proto.Message
+
+		publicKeyHash string
 	}
 
 	// The Status type describes different statuses a Peer can have.
 	Status int
 )
 
+func FromProto(in *whisperv1.Peer, curve ecdh.Curve) (Peer, error) {
+	publicKey, err := curve.NewPublicKey(in.GetPublicKey())
+	if err != nil {
+		return Peer{}, fmt.Errorf("failed to parse public key: %w", err)
+	}
+
+	hash := sha256.Sum256(in.GetPublicKey())
+	peer := Peer{
+		ID:            in.GetId(),
+		Address:       in.GetAddress(),
+		Delta:         in.GetDelta(),
+		Status:        Status(in.GetStatus()),
+		PublicKey:     publicKey,
+		publicKeyHash: string(hash[:]),
+	}
+
+	if in.GetMetadata() != nil {
+		peer.Metadata, err = in.GetMetadata().UnmarshalNew()
+		if err != nil {
+			return Peer{}, fmt.Errorf("invalid peer metadata: %w", err)
+		}
+	}
+
+	return peer, nil
+}
+
 // IsEmpty returns true if the peer has an unspecified status. In all valid scenarios a peer should have a non-zero
 // status set.
 func (p Peer) IsEmpty() bool {
 	return p.Status == StatusUnspecified
+}
+
+func (p Peer) Hash() string {
+	return p.publicKeyHash
 }
 
 const (

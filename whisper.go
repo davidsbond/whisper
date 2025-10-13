@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/big"
+	mathrand "math/rand/v2"
 	"net"
 	"sync"
 	"time"
@@ -35,9 +35,11 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
+	"github.com/davidsbond/whisper/internal/bytepool"
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
 	whisperv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1"
 	"github.com/davidsbond/whisper/internal/service"
+	"github.com/davidsbond/whisper/internal/syncmap"
 	"github.com/davidsbond/whisper/pkg/peer"
 	"github.com/davidsbond/whisper/pkg/store"
 )
@@ -51,16 +53,22 @@ type (
 		store       PeerStore
 
 		// Used for encryption
-		key   *ecdh.PrivateKey
-		curve ecdh.Curve
+		key         *ecdh.PrivateKey
+		curve       ecdh.Curve
+		cipherCache *syncmap.Map[string, cipher.AEAD]
 
 		// Advertised to other peers
 		address  string
 		metadata proto.Message
 
 		// Used for networking
-		port int
+		port  int
+		bytes *bytepool.Pool
 	}
+)
+
+const (
+	udpSize = 65535
 )
 
 // New returns a new whisper node with the specified id. See the Option type for available configuration values.
@@ -80,6 +88,8 @@ func New(id uint64, options ...Option) *Node {
 		store:       cfg.store,
 		port:        cfg.port,
 		joinAddress: cfg.joinAddress,
+		bytes:       bytepool.New(udpSize),
+		cipherCache: syncmap.New[string, cipher.AEAD](),
 	}
 }
 
@@ -209,24 +219,9 @@ func (n *Node) join(ctx context.Context, self peer.Peer) error {
 	}
 
 	for _, protoPeer := range response.GetPeers() {
-		publicKey, err := n.curve.NewPublicKey(protoPeer.GetPublicKey())
+		p, err := peer.FromProto(protoPeer, n.curve)
 		if err != nil {
-			return fmt.Errorf("failed to parse public key for peer %q: %w", protoPeer.GetId(), err)
-		}
-
-		p := peer.Peer{
-			ID:        protoPeer.GetId(),
-			Address:   protoPeer.GetAddress(),
-			Delta:     protoPeer.GetDelta(),
-			Status:    peer.Status(protoPeer.GetStatus()),
-			PublicKey: publicKey,
-		}
-
-		if protoPeer.GetMetadata() != nil {
-			p.Metadata, err = protoPeer.GetMetadata().UnmarshalNew()
-			if err != nil {
-				return fmt.Errorf("failed to unmarshal metadata for peer %q: %w", protoPeer.GetId(), err)
-			}
+			return fmt.Errorf("failed to parse peer: %w", err)
 		}
 
 		if err = n.store.SavePeer(ctx, p); err != nil {
@@ -289,8 +284,6 @@ func (n *Node) listenTCP(ctx context.Context) error {
 }
 
 func (n *Node) listenUDP(ctx context.Context) error {
-	const udpSize = 65535
-
 	udp, err := net.ListenUDP("udp", &net.UDPAddr{Port: n.port})
 	if err != nil {
 		return fmt.Errorf("failed to listen on port %d: %w", n.port, err)
@@ -302,7 +295,6 @@ func (n *Node) listenUDP(ctx context.Context) error {
 	)
 
 	defer group.Wait()
-	buf := make([]byte, udpSize)
 
 	for {
 		select {
@@ -314,27 +306,30 @@ func (n *Node) listenUDP(ctx context.Context) error {
 				continue
 			}
 
+			buf := n.bytes.Get()
+
 			length, _, err := udp.ReadFromUDP(buf)
 			switch {
 			case errors.As(err, &netErr) && netErr.Timeout():
+				n.bytes.Put(buf)
 				continue
 			case err != nil:
+				n.bytes.Put(buf)
 				n.logger.With("error", err).Error("failed to read UDP packet")
 				continue
 			}
 
-			payload := make([]byte, length)
-			copy(payload, buf[:length])
-
 			group.Add(1)
-			go n.handlePeerMessage(ctx, &group, payload)
+			go func(payload []byte) {
+				defer group.Done()
+				defer n.bytes.Put(buf)
+				n.handlePeerMessage(ctx, payload)
+			}(buf[:length])
 		}
 	}
 }
 
-func (n *Node) handlePeerMessage(ctx context.Context, group *sync.WaitGroup, payload []byte) {
-	defer group.Done()
-
+func (n *Node) handlePeerMessage(ctx context.Context, payload []byte) {
 	message := &whisperv1.PeerMessage{}
 	if err := proto.Unmarshal(payload, message); err != nil {
 		n.logger.With("error", err).Error("failed to unmarshal peer message")
@@ -427,25 +422,9 @@ func (n *Node) sendPeerMessage(target, local peer.Peer) error {
 }
 
 func (n *Node) decryptPeer(source peer.Peer, message *whisperv1.PeerMessage) (peer.Peer, error) {
-	secret, err := n.key.ECDH(source.PublicKey)
+	gcm, err := n.getGCM(source)
 	if err != nil {
-		return peer.Peer{}, fmt.Errorf("failed to derive shared secret: %w", err)
-	}
-
-	reader := hkdf.New(sha256.New, secret, nil, []byte("whisper"))
-	key := make([]byte, 32)
-	if _, err = io.ReadFull(reader, key); err != nil {
-		return peer.Peer{}, fmt.Errorf("failed to derive AES key: %w", err)
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return peer.Peer{}, fmt.Errorf("failed to create AES block: %w", err)
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return peer.Peer{}, fmt.Errorf("failed to create GCM: %w", err)
+		return peer.Peer{}, fmt.Errorf("failed to get GCM: %w", err)
 	}
 
 	nonce := message.GetNonce()
@@ -461,49 +440,18 @@ func (n *Node) decryptPeer(source peer.Peer, message *whisperv1.PeerMessage) (pe
 		return peer.Peer{}, fmt.Errorf("failed to unmarshal peer: %w", err)
 	}
 
-	publicKey, err := n.curve.NewPublicKey(protoPeer.GetPublicKey())
+	p, err := peer.FromProto(protoPeer, n.curve)
 	if err != nil {
-		return peer.Peer{}, fmt.Errorf("failed to parse public key: %w", err)
-	}
-
-	p := peer.Peer{
-		ID:        protoPeer.GetId(),
-		Address:   protoPeer.GetAddress(),
-		Delta:     protoPeer.GetDelta(),
-		Status:    peer.Status(protoPeer.GetStatus()),
-		PublicKey: publicKey,
-	}
-
-	if protoPeer.Metadata != nil {
-		p.Metadata, err = protoPeer.Metadata.UnmarshalNew()
-		if err != nil {
-			return peer.Peer{}, fmt.Errorf("failed to unmarshal peer metadata: %w", err)
-		}
+		return peer.Peer{}, fmt.Errorf("failed to parse peer: %w", err)
 	}
 
 	return p, nil
 }
 
 func (n *Node) encryptPeer(target, peer peer.Peer) (nonce, ciphertext []byte, err error) {
-	secret, err := n.key.ECDH(target.PublicKey)
+	gcm, err := n.getGCM(target)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to derive shared secret: %w", err)
-	}
-
-	reader := hkdf.New(sha256.New, secret, nil, []byte("whisper"))
-	key := make([]byte, 32)
-	if _, err = io.ReadFull(reader, key); err != nil {
-		return nil, nil, fmt.Errorf("failed to derive AES key: %w", err)
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create AES block: %w", err)
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create GCM: %w", err)
+		return nil, nil, fmt.Errorf("failed to get GCM: %w", err)
 	}
 
 	protoPeer := &whisperv1.Peer{
@@ -535,8 +483,39 @@ func (n *Node) encryptPeer(target, peer peer.Peer) (nonce, ciphertext []byte, er
 	return nonce, ciphertext, nil
 }
 
+func (n *Node) getGCM(p peer.Peer) (cipher.AEAD, error) {
+	hash := p.Hash()
+	if gcm, ok := n.cipherCache.Get(hash); ok {
+		return gcm, nil
+	}
+
+	shared, err := n.key.ECDH(p.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive shared secret: %w", err)
+	}
+
+	var key [32]byte
+	hkdfReader := hkdf.New(sha256.New, shared, nil, []byte("whisper"))
+	if _, err := io.ReadFull(hkdfReader, key[:]); err != nil {
+		return nil, fmt.Errorf("failed to derive AES key: %w", err)
+	}
+
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AES block: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	n.cipherCache.Put(hash, gcm)
+	return gcm, nil
+}
+
 func (n *Node) gossip(ctx context.Context) error {
-	stateTicker := time.NewTicker(time.Second)
+	stateTicker := time.NewTicker(time.Second * 5)
 	defer stateTicker.Stop()
 
 	checkTicker := time.NewTicker(time.Minute)
@@ -693,12 +672,8 @@ func (n *Node) selectPeer(ctx context.Context) (peer.Peer, error) {
 		return peer.Peer{}, nil
 	}
 
-	idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(peers))))
-	if err != nil {
-		return peer.Peer{}, err
-	}
-
-	target := peers[idx.Int64()]
+	idx := mathrand.IntN(len(peers))
+	target := peers[idx]
 
 	// We never want to select ourselves or a peer with an inactive status.
 	if target.ID == n.id || target.Status != peer.StatusJoined {

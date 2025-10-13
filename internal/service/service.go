@@ -79,26 +79,12 @@ func (svc *Service) Join(ctx context.Context, r *whispersvcv1.JoinRequest) (*whi
 		return nil, status.Errorf(codes.AlreadyExists, "peer %q is already an active peer in the network", r.GetPeer().GetId())
 	}
 
-	publicKey, err := svc.curve.NewPublicKey(r.GetPeer().GetPublicKey())
+	p, err := peer.FromProto(r.GetPeer(), svc.curve)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "failed to parse public key: %v", err)
+		return nil, status.Errorf(codes.InvalidArgument, "failed to parse peer %q: %v", r.GetPeer().GetId(), err)
 	}
 
-	p := peer.Peer{
-		ID:        r.GetPeer().GetId(),
-		Address:   r.GetPeer().GetAddress(),
-		Delta:     time.Now().UnixNano(),
-		Status:    peer.StatusJoined,
-		PublicKey: publicKey,
-	}
-
-	if r.GetPeer().GetMetadata() != nil {
-		p.Metadata, err = r.GetPeer().GetMetadata().UnmarshalNew()
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "failed to unmarshal metadata: %v", err)
-		}
-	}
-
+	p.Status = peer.StatusJoined
 	if err = svc.peers.SavePeer(ctx, p); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to save peer: %v", err)
 	}
