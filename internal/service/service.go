@@ -87,7 +87,7 @@ func (svc *Service) Join(ctx context.Context, r *whispersvcv1.JoinRequest) (*whi
 	p := peer.Peer{
 		ID:        r.GetPeer().GetId(),
 		Address:   r.GetPeer().GetAddress(),
-		Delta:     time.Now().Unix(),
+		Delta:     time.Now().UnixNano(),
 		Status:    peer.StatusJoined,
 		PublicKey: publicKey,
 	}
@@ -169,7 +169,7 @@ func (svc *Service) Leave(ctx context.Context, r *whispersvcv1.LeaveRequest) (*w
 	}
 
 	p.Status = peer.StatusLeft
-	p.Delta = time.Now().Unix()
+	p.Delta = time.Now().UnixNano()
 
 	if err = svc.peers.SavePeer(ctx, p); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to save peer %q: %v", r.GetId(), err)

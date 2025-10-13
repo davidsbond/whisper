@@ -110,11 +110,35 @@ func (n *Node) Run(ctx context.Context) error {
 	return group.Wait()
 }
 
+// SetMetadata updates the metadata on the Node. This causes a delta update which will be propagated out to the
+// gossip network.
+func (n *Node) SetMetadata(ctx context.Context, message proto.Message) error {
+	metadata, err := anypb.New(message)
+	if err != nil {
+		return fmt.Errorf("invalid metadata: %w", err)
+	}
+
+	self, err := n.store.FindPeer(ctx, n.id)
+	if err != nil {
+		return fmt.Errorf("failed to lookup local peer record: %w", err)
+	}
+
+	self.Metadata = metadata
+	self.Delta = time.Now().UnixNano()
+
+	if err = n.store.SavePeer(ctx, self); err != nil {
+		return fmt.Errorf("failed to save local peer record: %w", err)
+	}
+
+	n.metadata = message
+	return nil
+}
+
 func (n *Node) bootstrap(ctx context.Context) error {
 	self := peer.Peer{
 		ID:      n.id,
 		Address: n.address,
-		Delta:   time.Now().Unix(),
+		Delta:   time.Now().UnixNano(),
 		Status:  peer.StatusJoining,
 	}
 
@@ -640,7 +664,7 @@ func (n *Node) checkPeerViaPeer(ctx context.Context, target peer.Peer) error {
 
 func (n *Node) markPeerGone(ctx context.Context, target peer.Peer) error {
 	target.Status = peer.StatusGone
-	target.Delta = time.Now().Unix()
+	target.Delta = time.Now().UnixNano()
 
 	if err := n.store.SavePeer(ctx, target); err != nil {
 		return fmt.Errorf("failed to save peer: %w", err)
