@@ -15,12 +15,13 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"sync"
@@ -41,52 +42,88 @@ import (
 	"github.com/davidsbond/whisper/pkg/store"
 )
 
-// Run a whisper node.
-func Run(ctx context.Context, options ...Option) error {
+type (
+	// The Node type represents a single whisper node. Nodes should be created via the New function.
+	Node struct {
+		id          uint64
+		joinAddress string
+		logger      *slog.Logger
+		store       PeerStore
+
+		// Used for encryption
+		key   *ecdh.PrivateKey
+		curve ecdh.Curve
+
+		// Advertised to other peers
+		address  string
+		metadata proto.Message
+
+		// Used for networking
+		port int
+	}
+)
+
+// New returns a new whisper node with the specified id. See the Option type for available configuration values.
+func New(id uint64, options ...Option) *Node {
 	cfg := defaultConfig()
 	for _, opt := range options {
 		opt(cfg)
 	}
 
-	if err := bootstrap(ctx, cfg); err != nil {
+	return &Node{
+		id:          id,
+		key:         cfg.key,
+		curve:       cfg.curve,
+		address:     cfg.address,
+		metadata:    cfg.metadata,
+		logger:      cfg.logger,
+		store:       cfg.store,
+		port:        cfg.port,
+		joinAddress: cfg.joinAddress,
+	}
+}
+
+// Run a whisper node.
+func (n *Node) Run(ctx context.Context) error {
+	if err := n.bootstrap(ctx); err != nil {
 		return fmt.Errorf("failed to bootstrap peer: %w", err)
 	}
 
 	group, ctx := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		return listenTCP(ctx, cfg)
+		return n.listenTCP(ctx)
 	})
 
 	group.Go(func() error {
-		return listenUDP(ctx, cfg)
+		return n.listenUDP(ctx)
 	})
 
 	group.Go(func() error {
-		return gossip(ctx, cfg)
+		return n.gossip(ctx)
 	})
 
 	group.Go(func() error {
 		<-ctx.Done()
-		return leave(cfg)
+		return n.leave()
 	})
 
 	return group.Wait()
 }
 
-func bootstrap(ctx context.Context, cfg *config) error {
+func (n *Node) bootstrap(ctx context.Context) error {
 	self := peer.Peer{
-		ID:      cfg.id,
-		Address: cfg.address,
+		ID:      n.id,
+		Address: n.address,
 		Delta:   time.Now().Unix(),
 		Status:  peer.StatusJoining,
 	}
 
-	if cfg.joinAddress == "" {
+	if n.joinAddress == "" {
 		self.Status = peer.StatusJoined
 	}
 
-	if cfg.metadata != nil {
-		metadata, err := anypb.New(cfg.metadata)
+	if n.metadata != nil {
+		metadata, err := anypb.New(n.metadata)
 		if err != nil {
 			return fmt.Errorf("invalid metadata: %w", err)
 		}
@@ -94,26 +131,22 @@ func bootstrap(ctx context.Context, cfg *config) error {
 		self.Metadata = metadata
 	}
 
-	if cfg.key == nil {
-		key, err := cfg.curve.GenerateKey(rand.Reader)
+	if n.key == nil {
+		key, err := n.curve.GenerateKey(rand.Reader)
 		if err != nil {
 			return fmt.Errorf("failed to generate key: %w", err)
 		}
 
-		cfg.logger.
-			With("public_key", base64.StdEncoding.EncodeToString(key.PublicKey().Bytes())).
-			Debug("generated new private key")
-
 		self.PublicKey = key.PublicKey()
-		cfg.key = key
+		n.key = key
 	}
 
-	if err := cfg.store.SavePeer(ctx, self); err != nil {
+	if err := n.store.SavePeer(ctx, self); err != nil {
 		return fmt.Errorf("failed to save local peer record: %w", err)
 	}
 
-	if cfg.joinAddress != "" {
-		if err := join(ctx, cfg, self); err != nil {
+	if n.joinAddress != "" {
+		if err := n.join(ctx, self); err != nil {
 			return fmt.Errorf("failed to join gossip network: %w", err)
 		}
 	}
@@ -121,10 +154,8 @@ func bootstrap(ctx context.Context, cfg *config) error {
 	return nil
 }
 
-func join(ctx context.Context, cfg *config, self peer.Peer) error {
-	cfg.logger.With("address", cfg.address).Debug("joining gossip network")
-
-	client, closer, err := peer.Dial(cfg.joinAddress)
+func (n *Node) join(ctx context.Context, self peer.Peer) error {
+	client, closer, err := peer.Dial(n.joinAddress)
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
 	}
@@ -154,7 +185,7 @@ func join(ctx context.Context, cfg *config, self peer.Peer) error {
 	}
 
 	for _, protoPeer := range response.GetPeers() {
-		publicKey, err := cfg.curve.NewPublicKey(protoPeer.GetPublicKey())
+		publicKey, err := n.curve.NewPublicKey(protoPeer.GetPublicKey())
 		if err != nil {
 			return fmt.Errorf("failed to parse public key for peer %q: %w", protoPeer.GetId(), err)
 		}
@@ -174,7 +205,7 @@ func join(ctx context.Context, cfg *config, self peer.Peer) error {
 			}
 		}
 
-		if err = cfg.store.SavePeer(ctx, p); err != nil {
+		if err = n.store.SavePeer(ctx, p); err != nil {
 			return fmt.Errorf("failed to save peer record: %w", err)
 		}
 	}
@@ -182,13 +213,11 @@ func join(ctx context.Context, cfg *config, self peer.Peer) error {
 	return nil
 }
 
-func leave(cfg *config) error {
-	cfg.logger.Debug("leaving gossip network")
-
+func (n *Node) leave() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	selected, err := selectPeer(ctx, cfg)
+	selected, err := n.selectPeer(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to select peer: %w", err)
 	}
@@ -203,7 +232,7 @@ func leave(cfg *config) error {
 	}
 
 	defer closer()
-	request := &whispersvcv1.LeaveRequest{Id: cfg.id}
+	request := &whispersvcv1.LeaveRequest{Id: n.id}
 	if _, err = client.Leave(ctx, request); err != nil {
 		return fmt.Errorf("failed to send leave request: %w", err)
 	}
@@ -211,30 +240,23 @@ func leave(cfg *config) error {
 	return nil
 }
 
-func listenTCP(ctx context.Context, cfg *config) error {
-	tcp, err := net.ListenTCP("tcp", &net.TCPAddr{Port: cfg.port})
+func (n *Node) listenTCP(ctx context.Context) error {
+	tcp, err := net.ListenTCP("tcp", &net.TCPAddr{Port: n.port})
 	if err != nil {
-		return fmt.Errorf("failed to listen on port %d: %w", cfg.port, err)
+		return fmt.Errorf("failed to listen on port %d: %w", n.port, err)
 	}
 
-	server := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(cfg.interceptors...),
-	)
-
-	service.New(cfg.id, cfg.store, cfg.curve).Register(server)
+	server := grpc.NewServer()
+	service.New(n.id, n.store, n.curve).Register(server)
 
 	group, ctx := errgroup.WithContext(ctx)
 
 	group.Go(func() error {
-		cfg.logger.With("port", cfg.port).Debug("serving gRPC")
-
 		return server.Serve(tcp)
 	})
 
 	group.Go(func() error {
 		<-ctx.Done()
-
-		cfg.logger.Debug("shutting down gRPC server")
 		server.GracefulStop()
 		return tcp.Close()
 	})
@@ -242,15 +264,13 @@ func listenTCP(ctx context.Context, cfg *config) error {
 	return group.Wait()
 }
 
-func listenUDP(ctx context.Context, cfg *config) error {
+func (n *Node) listenUDP(ctx context.Context) error {
 	const udpSize = 65535
 
-	udp, err := net.ListenUDP("udp", &net.UDPAddr{Port: cfg.port})
+	udp, err := net.ListenUDP("udp", &net.UDPAddr{Port: n.port})
 	if err != nil {
-		return fmt.Errorf("failed to listen on port %d: %w", cfg.port, err)
+		return fmt.Errorf("failed to listen on port %d: %w", n.port, err)
 	}
-
-	cfg.logger.With("port", cfg.port).Debug("serving UDP")
 
 	var (
 		netErr net.Error
@@ -263,11 +283,10 @@ func listenUDP(ctx context.Context, cfg *config) error {
 	for {
 		select {
 		case <-ctx.Done():
-			cfg.logger.Debug("shutting down UDP server")
 			return udp.Close()
 		default:
 			if err = udp.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-				cfg.logger.With("error", err).Error("failed to set read deadline")
+				n.logger.With("error", err).Error("failed to set read deadline")
 				continue
 			}
 
@@ -276,7 +295,7 @@ func listenUDP(ctx context.Context, cfg *config) error {
 			case errors.As(err, &netErr) && netErr.Timeout():
 				continue
 			case err != nil:
-				cfg.logger.With("error", err).Error("failed to read UDP packet")
+				n.logger.With("error", err).Error("failed to read UDP packet")
 				continue
 			}
 
@@ -284,33 +303,32 @@ func listenUDP(ctx context.Context, cfg *config) error {
 			copy(payload, buf[:length])
 
 			group.Add(1)
-			go handlePeerMessage(ctx, &group, cfg, payload)
+			go n.handlePeerMessage(ctx, &group, payload)
 		}
 	}
 }
 
-func handlePeerMessage(ctx context.Context, group *sync.WaitGroup, cfg *config, payload []byte) {
+func (n *Node) handlePeerMessage(ctx context.Context, group *sync.WaitGroup, payload []byte) {
 	defer group.Done()
 
 	message := &whisperv1.PeerMessage{}
 	if err := proto.Unmarshal(payload, message); err != nil {
-		cfg.logger.With("error", err).Error("failed to unmarshal peer message")
+		n.logger.With("error", err).Error("failed to unmarshal peer message")
 		return
 	}
 
-	logger := cfg.logger.With("source_id", message.GetSourceId())
+	logger := n.logger.With("source_id", message.GetSourceId())
 
-	source, err := cfg.store.FindPeer(ctx, message.GetSourceId())
+	source, err := n.store.FindPeer(ctx, message.GetSourceId())
 	switch {
 	case errors.Is(err, store.ErrPeerNotFound):
-		logger.Warn("received message from unknown peer")
 		return
 	case err != nil:
 		logger.With("error", err).Error("failed to lookup peer")
 		return
 	}
 
-	remote, err := decryptPeer(cfg, source, message)
+	remote, err := n.decryptPeer(source, message)
 	if err != nil {
 		logger.With("error", err).Error("failed to decrypt peer")
 		return
@@ -318,7 +336,7 @@ func handlePeerMessage(ctx context.Context, group *sync.WaitGroup, cfg *config, 
 
 	logger = logger.With("peer_id", remote.ID)
 
-	local, err := cfg.store.FindPeer(ctx, remote.ID)
+	local, err := n.store.FindPeer(ctx, remote.ID)
 	switch {
 	case errors.Is(err, store.ErrPeerNotFound):
 		break
@@ -329,9 +347,7 @@ func handlePeerMessage(ctx context.Context, group *sync.WaitGroup, cfg *config, 
 
 	// The inbound peer data is newer than ours, so we should update our local state.
 	if remote.Delta > local.Delta {
-		logger.Debug("got new peer data")
-
-		if err = cfg.store.SavePeer(ctx, remote); err != nil {
+		if err = n.store.SavePeer(ctx, remote); err != nil {
 			logger.With("error", err).Error("failed to save peer")
 		}
 
@@ -345,14 +361,13 @@ func handlePeerMessage(ctx context.Context, group *sync.WaitGroup, cfg *config, 
 
 	// In this case, the peer sending the data is out-of-date. So we'll send our local state for this peer
 	// to them.
-	logger.Debug("got old peer data, updating source")
-	if err = sendPeerMessage(cfg, source, local); err != nil {
+	if err = n.sendPeerMessage(source, local); err != nil {
 		logger.With("error", err).Error("failed to send peer message")
 		return
 	}
 }
 
-func sendPeerMessage(cfg *config, target, local peer.Peer) error {
+func (n *Node) sendPeerMessage(target, local peer.Peer) error {
 	udp, err := net.ResolveUDPAddr("udp", target.Address)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
@@ -364,13 +379,13 @@ func sendPeerMessage(cfg *config, target, local peer.Peer) error {
 	}
 
 	defer conn.Close()
-	nonce, ciphertext, err := encryptPeer(cfg, target, local)
+	nonce, ciphertext, err := n.encryptPeer(target, local)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt peer: %w", err)
 	}
 
 	message := &whisperv1.PeerMessage{
-		SourceId:   cfg.id,
+		SourceId:   n.id,
 		Nonce:      nonce,
 		Ciphertext: ciphertext,
 	}
@@ -387,8 +402,8 @@ func sendPeerMessage(cfg *config, target, local peer.Peer) error {
 	return nil
 }
 
-func decryptPeer(cfg *config, source peer.Peer, message *whisperv1.PeerMessage) (peer.Peer, error) {
-	secret, err := cfg.key.ECDH(source.PublicKey)
+func (n *Node) decryptPeer(source peer.Peer, message *whisperv1.PeerMessage) (peer.Peer, error) {
+	secret, err := n.key.ECDH(source.PublicKey)
 	if err != nil {
 		return peer.Peer{}, fmt.Errorf("failed to derive shared secret: %w", err)
 	}
@@ -422,7 +437,7 @@ func decryptPeer(cfg *config, source peer.Peer, message *whisperv1.PeerMessage) 
 		return peer.Peer{}, fmt.Errorf("failed to unmarshal peer: %w", err)
 	}
 
-	publicKey, err := cfg.curve.NewPublicKey(protoPeer.GetPublicKey())
+	publicKey, err := n.curve.NewPublicKey(protoPeer.GetPublicKey())
 	if err != nil {
 		return peer.Peer{}, fmt.Errorf("failed to parse public key: %w", err)
 	}
@@ -445,8 +460,8 @@ func decryptPeer(cfg *config, source peer.Peer, message *whisperv1.PeerMessage) 
 	return p, nil
 }
 
-func encryptPeer(cfg *config, target, peer peer.Peer) (nonce, ciphertext []byte, err error) {
-	secret, err := cfg.key.ECDH(target.PublicKey)
+func (n *Node) encryptPeer(target, peer peer.Peer) (nonce, ciphertext []byte, err error) {
+	secret, err := n.key.ECDH(target.PublicKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to derive shared secret: %w", err)
 	}
@@ -496,7 +511,7 @@ func encryptPeer(cfg *config, target, peer peer.Peer) (nonce, ciphertext []byte,
 	return nonce, ciphertext, nil
 }
 
-func gossip(ctx context.Context, cfg *config) error {
+func (n *Node) gossip(ctx context.Context) error {
 	stateTicker := time.NewTicker(time.Second)
 	defer stateTicker.Stop()
 
@@ -508,19 +523,19 @@ func gossip(ctx context.Context, cfg *config) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-stateTicker.C:
-			if err := shareState(ctx, cfg); err != nil {
-				cfg.logger.With("error", err).Error("failed to share state")
+			if err := n.shareState(ctx); err != nil {
+				n.logger.With("error", err).Error("failed to share state")
 			}
 		case <-checkTicker.C:
-			if err := checkPeer(ctx, cfg); err != nil {
-				cfg.logger.With("error", err).Error("failed to check peer")
+			if err := n.checkPeer(ctx); err != nil {
+				n.logger.With("error", err).Error("failed to check peer")
 			}
 		}
 	}
 }
 
-func shareState(ctx context.Context, cfg *config) error {
-	target, err := selectPeer(ctx, cfg)
+func (n *Node) shareState(ctx context.Context) error {
+	target, err := n.selectPeer(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to select peer: %w", err)
 	}
@@ -529,7 +544,7 @@ func shareState(ctx context.Context, cfg *config) error {
 		return nil
 	}
 
-	peers, err := cfg.store.ListPeers(ctx)
+	peers, err := n.store.ListPeers(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list peers: %w", err)
 	}
@@ -541,7 +556,7 @@ func shareState(ctx context.Context, cfg *config) error {
 			continue
 		}
 
-		if err = sendPeerMessage(cfg, target, p); err != nil {
+		if err = n.sendPeerMessage(target, p); err != nil {
 			return fmt.Errorf("failed to send peer message to peer %q: %w", target.ID, err)
 		}
 	}
@@ -549,8 +564,8 @@ func shareState(ctx context.Context, cfg *config) error {
 	return nil
 }
 
-func checkPeer(ctx context.Context, cfg *config) error {
-	target, err := selectPeer(ctx, cfg)
+func (n *Node) checkPeer(ctx context.Context) error {
+	target, err := n.selectPeer(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to select peer: %w", err)
 	}
@@ -559,18 +574,16 @@ func checkPeer(ctx context.Context, cfg *config) error {
 		return nil
 	}
 
-	cfg.logger.With("peer_id", target.ID).Debug("checking peer is reachable")
-
 	client, closer, err := peer.Dial(target.Address)
 	if err != nil {
-		if err = checkPeerViaPeer(ctx, cfg, target); err != nil {
+		if err = n.checkPeerViaPeer(ctx, target); err != nil {
 			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
 		}
 	}
 
 	defer closer()
 	if _, err = client.Status(ctx, &whispersvcv1.StatusRequest{}); err != nil {
-		if err = checkPeerViaPeer(ctx, cfg, target); err != nil {
+		if err = n.checkPeerViaPeer(ctx, target); err != nil {
 			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
 		}
 	}
@@ -578,7 +591,7 @@ func checkPeer(ctx context.Context, cfg *config) error {
 	return nil
 }
 
-func checkPeerViaPeer(ctx context.Context, cfg *config, target peer.Peer) error {
+func (n *Node) checkPeerViaPeer(ctx context.Context, target peer.Peer) error {
 	var selected peer.Peer
 
 	for {
@@ -586,7 +599,7 @@ func checkPeerViaPeer(ctx context.Context, cfg *config, target peer.Peer) error 
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			checker, err := selectPeer(ctx, cfg)
+			checker, err := n.selectPeer(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to select peer: %w", err)
 			}
@@ -600,8 +613,6 @@ func checkPeerViaPeer(ctx context.Context, cfg *config, target peer.Peer) error 
 
 		break
 	}
-
-	cfg.logger.With("target_id", target.ID, "checking_id", selected.ID).Debug("checking peer liveness via peer")
 
 	client, closer, err := peer.Dial(selected.Address)
 	if err != nil {
@@ -617,9 +628,9 @@ func checkPeerViaPeer(ctx context.Context, cfg *config, target peer.Peer) error 
 		return nil
 	case codes.NotFound:
 		// The peer we called doesn't have the target peer in their state, try another peer
-		return checkPeerViaPeer(ctx, cfg, target)
+		return n.checkPeerViaPeer(ctx, target)
 	default:
-		if err = markPeerGone(ctx, cfg, target); err != nil {
+		if err = n.markPeerGone(ctx, target); err != nil {
 			return fmt.Errorf("failed to mark peer %q as gone: %w", target.ID, err)
 		}
 	}
@@ -627,26 +638,26 @@ func checkPeerViaPeer(ctx context.Context, cfg *config, target peer.Peer) error 
 	return nil
 }
 
-func markPeerGone(ctx context.Context, cfg *config, target peer.Peer) error {
+func (n *Node) markPeerGone(ctx context.Context, target peer.Peer) error {
 	target.Status = peer.StatusGone
 	target.Delta = time.Now().Unix()
 
-	if err := cfg.store.SavePeer(ctx, target); err != nil {
+	if err := n.store.SavePeer(ctx, target); err != nil {
 		return fmt.Errorf("failed to save peer: %w", err)
 	}
 
 	return nil
 }
 
-func selectPeer(ctx context.Context, cfg *config) (peer.Peer, error) {
-	peers, err := cfg.store.ListPeers(ctx)
+func (n *Node) selectPeer(ctx context.Context) (peer.Peer, error) {
+	peers, err := n.store.ListPeers(ctx)
 	if err != nil {
 		return peer.Peer{}, err
 	}
 
 	var availablePeers int
 	for _, p := range peers {
-		if p.ID == cfg.id || p.Status != peer.StatusJoined {
+		if p.ID == n.id || p.Status != peer.StatusJoined {
 			continue
 		}
 
@@ -666,8 +677,8 @@ func selectPeer(ctx context.Context, cfg *config) (peer.Peer, error) {
 	target := peers[idx.Int64()]
 
 	// We never want to select ourselves or a peer with an inactive status.
-	if target.ID == cfg.id || target.Status != peer.StatusJoined {
-		return selectPeer(ctx, cfg)
+	if target.ID == n.id || target.Status != peer.StatusJoined {
+		return n.selectPeer(ctx)
 	}
 
 	return target, nil

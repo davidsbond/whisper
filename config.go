@@ -5,7 +5,6 @@ import (
 	"crypto/ecdh"
 	"log/slog"
 
-	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/davidsbond/whisper/pkg/peer"
@@ -17,16 +16,14 @@ type (
 	Option func(*config)
 
 	config struct {
-		id           uint64
-		address      string
-		port         int
-		key          *ecdh.PrivateKey
-		metadata     proto.Message
-		curve        ecdh.Curve
-		joinAddress  string
-		logger       *slog.Logger
-		store        PeerStore
-		interceptors []grpc.UnaryServerInterceptor
+		address     string
+		port        int
+		key         *ecdh.PrivateKey
+		metadata    proto.Message
+		curve       ecdh.Curve
+		joinAddress string
+		logger      *slog.Logger
+		store       PeerStore
 	}
 
 	// The PeerStore interface describes types that can persist peer data.
@@ -57,13 +54,6 @@ func defaultConfig() *config {
 		logger:      slog.Default(),
 		// By default, all peer data is stored in-memory
 		store: store.NewInMemoryStore(),
-	}
-}
-
-// WithID modifies the identifier used by the whisper node. This id must be unique per instance.
-func WithID(id uint64) Option {
-	return func(c *config) {
-		c.id = id
 	}
 }
 
@@ -127,12 +117,5 @@ func WithStore(store PeerStore) Option {
 func WithJoinAddress(joinAddress string) Option {
 	return func(c *config) {
 		c.joinAddress = joinAddress
-	}
-}
-
-// WithInterceptors modifies gRPC interceptors used by the gRPC server. This function performs appends.
-func WithInterceptors(interceptors ...grpc.UnaryServerInterceptor) Option {
-	return func(c *config) {
-		c.interceptors = append(c.interceptors, interceptors...)
 	}
 }

@@ -23,26 +23,31 @@ func TestWhisper_Run(t *testing.T) {
 		Level: slog.LevelDebug,
 	}))
 
+	n1 := whisper.New(1, whisper.WithLogger(logger.With("local_id", 1)))
+	n2 := whisper.New(2,
+		whisper.WithLogger(logger.With("local_id", 2)),
+		whisper.WithPort(8001),
+		whisper.WithAddress("0.0.0.0:8001"),
+		whisper.WithJoinAddress("0.0.0.0:8000"),
+	)
+	n3 := whisper.New(3,
+		whisper.WithLogger(logger.With("local_id", 3)),
+		whisper.WithPort(8002),
+		whisper.WithAddress("0.0.0.0:8002"),
+		whisper.WithJoinAddress("0.0.0.0:8001"),
+	)
+
 	group, ctx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		t.Logf("starting node 1")
-		return whisper.Run(ctx,
-			whisper.WithID(1),
-			whisper.WithLogger(logger.With("local_id", 1)),
-		)
+		return n1.Run(ctx)
 	})
 
 	group.Go(func() error {
 		<-time.After(time.Second * 5)
 
 		t.Logf("starting node 2")
-		return whisper.Run(ctx,
-			whisper.WithID(2),
-			whisper.WithLogger(logger.With("local_id", 2)),
-			whisper.WithPort(8001),
-			whisper.WithAddress("0.0.0.0:8001"),
-			whisper.WithJoinAddress("0.0.0.0:8000"),
-		)
+		return n2.Run(ctx)
 	})
 
 	group.Go(func() error {
@@ -52,17 +57,10 @@ func TestWhisper_Run(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Minute/2)
 		defer cancel()
 
-		t.Logf("starting node 3")
-
 		group, ctx := errgroup.WithContext(ctx)
 		group.Go(func() error {
-			return whisper.Run(ctx,
-				whisper.WithID(3),
-				whisper.WithLogger(logger.With("local_id", 3)),
-				whisper.WithPort(8002),
-				whisper.WithAddress("0.0.0.0:8002"),
-				whisper.WithJoinAddress("0.0.0.0:8001"),
-			)
+			t.Logf("starting node 3")
+			return n3.Run(ctx)
 		})
 
 		group.Go(func() error {

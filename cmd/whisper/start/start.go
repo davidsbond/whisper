@@ -1,6 +1,7 @@
 package start
 
 import (
+	"crypto/ecdh"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,7 +17,7 @@ func Command() *cobra.Command {
 		port        int
 		address     string
 		joinAddress string
-		debug       bool
+		keyFile     string
 	)
 
 	cmd := &cobra.Command{
@@ -35,20 +36,31 @@ func Command() *cobra.Command {
 				return fmt.Errorf("failed to parse id: %w", err)
 			}
 
-			logger := slog.Default()
-			if debug {
-				logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-					Level: slog.LevelDebug,
-				}))
+			curve := ecdh.X25519()
+
+			var key *ecdh.PrivateKey
+			if keyFile != "" {
+				keyData, err := os.ReadFile(keyFile)
+				if err != nil {
+					return fmt.Errorf("failed to read key file %q: %w", keyFile, err)
+				}
+
+				key, err = curve.NewPrivateKey(keyData)
+				if err != nil {
+					return fmt.Errorf("failed to parse key file %q: %w", keyFile, err)
+				}
 			}
 
-			return whisper.Run(cmd.Context(),
-				whisper.WithID(id),
+			node := whisper.New(id,
 				whisper.WithPort(port),
 				whisper.WithAddress(address),
 				whisper.WithJoinAddress(joinAddress),
-				whisper.WithLogger(logger.With("local_id", id)),
+				whisper.WithLogger(slog.Default().With("local_id", id)),
+				whisper.WithCurve(curve),
+				whisper.WithKey(key),
 			)
+
+			return node.Run(cmd.Context())
 		},
 	}
 
@@ -56,7 +68,7 @@ func Command() *cobra.Command {
 	flags.IntVarP(&port, "port", "p", 8000, "port to use for TCP/UDP")
 	flags.StringVarP(&address, "address", "a", "0.0.0.0:8000", "address to advertise to other peers")
 	flags.StringVarP(&joinAddress, "join", "j", "", "address to use for joining the gossip network")
-	flags.BoolVar(&debug, "debug", false, "enable debug logging")
+	flags.StringVarP(&keyFile, "key", "k", "", "path to private key file")
 
 	return cmd
 }
