@@ -64,6 +64,12 @@ type (
 		// Used for networking
 		port  int
 		bytes *bytepool.Pool
+
+		// Used to signal the node is up and running
+		ready        chan struct{}
+		listeningUDP bool
+		listeningTCP bool
+		gossiping    bool
 	}
 )
 
@@ -90,6 +96,7 @@ func New(id uint64, options ...Option) *Node {
 		joinAddress: cfg.joinAddress,
 		bytes:       bytepool.New(udpSize),
 		cipherCache: syncmap.New[string, cipher.AEAD](),
+		ready:       make(chan struct{}, 1),
 	}
 }
 
@@ -114,10 +121,43 @@ func (n *Node) Run(ctx context.Context) error {
 
 	group.Go(func() error {
 		<-ctx.Done()
+		defer close(n.ready)
 		return n.leave()
 	})
 
-	return group.Wait()
+	err := group.Wait()
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+
+	return err
+}
+
+// Ready is used to determine if the whisper node is up and running. This method blocks until the node reports it is
+// ready or the given context is cancelled.
+func (n *Node) Ready(ctx context.Context) error {
+	n.reportReadiness()
+
+	select {
+	case <-n.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (n *Node) reportReadiness() {
+	if n.gossiping && n.listeningUDP && n.listeningTCP {
+		n.ready <- struct{}{}
+	}
+}
+
+func (n *Node) ID() uint64 {
+	return n.id
+}
+
+func (n *Node) Address() string {
+	return n.address
 }
 
 // SetMetadata updates the metadata on the Node. This causes a delta update which will be propagated out to the
@@ -271,11 +311,16 @@ func (n *Node) listenTCP(ctx context.Context) error {
 	group, ctx := errgroup.WithContext(ctx)
 
 	group.Go(func() error {
+		n.listeningTCP = true
+		n.reportReadiness()
+
 		return server.Serve(tcp)
 	})
 
 	group.Go(func() error {
 		<-ctx.Done()
+
+		n.listeningTCP = false
 		server.GracefulStop()
 		return tcp.Close()
 	})
@@ -289,6 +334,9 @@ func (n *Node) listenUDP(ctx context.Context) error {
 		return fmt.Errorf("failed to listen on port %d: %w", n.port, err)
 	}
 
+	n.listeningUDP = true
+	n.reportReadiness()
+
 	var (
 		netErr net.Error
 		group  sync.WaitGroup
@@ -299,6 +347,7 @@ func (n *Node) listenUDP(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			n.listeningUDP = false
 			return udp.Close()
 		default:
 			if err = udp.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -518,12 +567,16 @@ func (n *Node) gossip(ctx context.Context) error {
 	stateTicker := time.NewTicker(time.Second * 5)
 	defer stateTicker.Stop()
 
-	checkTicker := time.NewTicker(time.Minute)
+	checkTicker := time.NewTicker(time.Minute / 2)
 	defer checkTicker.Stop()
+
+	n.gossiping = true
+	n.reportReadiness()
 
 	for {
 		select {
 		case <-ctx.Done():
+			n.gossiping = false
 			return ctx.Err()
 		case <-stateTicker.C:
 			if err := n.shareState(ctx); err != nil {
