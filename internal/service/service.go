@@ -84,7 +84,6 @@ func (svc *Service) Join(ctx context.Context, r *whispersvcv1.JoinRequest) (*whi
 		return nil, status.Errorf(codes.InvalidArgument, "failed to parse peer %q: %v", r.GetPeer().GetId(), err)
 	}
 
-	p.Status = peer.StatusJoined
 	if err = svc.peers.SavePeer(ctx, p); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to save peer: %v", err)
 	}

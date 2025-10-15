@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"log/slog"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -16,14 +17,16 @@ type (
 	Option func(*config)
 
 	config struct {
-		address     string
-		port        int
-		key         *ecdh.PrivateKey
-		metadata    proto.Message
-		curve       ecdh.Curve
-		joinAddress string
-		logger      *slog.Logger
-		store       PeerStore
+		address        string
+		port           int
+		key            *ecdh.PrivateKey
+		metadata       proto.Message
+		curve          ecdh.Curve
+		joinAddress    string
+		logger         *slog.Logger
+		store          PeerStore
+		gossipInterval time.Duration
+		checkInterval  time.Duration
 	}
 
 	// The PeerStore interface describes types that can persist peer data.
@@ -54,6 +57,9 @@ func defaultConfig() *config {
 		logger:      slog.Default(),
 		// By default, all peer data is stored in-memory
 		store: store.NewInMemoryStore(),
+		// Default durations for gossiping
+		gossipInterval: 5 * time.Second,
+		checkInterval:  time.Minute / 2,
 	}
 }
 
@@ -117,5 +123,21 @@ func WithStore(store PeerStore) Option {
 func WithJoinAddress(joinAddress string) Option {
 	return func(c *config) {
 		c.joinAddress = joinAddress
+	}
+}
+
+// WithGossipInterval modifies the interval at which the peer's local state will be shared with a randomly selected
+// peer. Defaults to 5 seconds.
+func WithGossipInterval(interval time.Duration) Option {
+	return func(c *config) {
+		c.gossipInterval = interval
+	}
+}
+
+// WithCheckInterval modifies the interval at which the peer will confirm the liveness of a randomly selected active
+// peer. Defaults to 30 seconds.
+func WithCheckInterval(interval time.Duration) Option {
+	return func(c *config) {
+		c.checkInterval = interval
 	}
 }

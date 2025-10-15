@@ -2,6 +2,8 @@ package whisper_test
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,6 +22,7 @@ import (
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
 	whisperv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1"
 	"github.com/davidsbond/whisper/pkg/peer"
+	"github.com/davidsbond/whisper/pkg/store"
 )
 
 type (
@@ -62,16 +65,10 @@ func (s *WhisperTestSuite) TestSingleNode() {
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	node := whisper.New(1, whisper.WithLogger(s.logger))
+	nodes, _ := createNodes(t, s.logger, 1)
+	runNodes(t, ctx, nodes)
 
-	group, ctx := errgroup.WithContext(ctx)
-	group.Go(func() error {
-		return node.Run(ctx)
-	})
-
-	s.Require().NoError(node.Ready(ctx))
-
-	client := dialPeer(t, node.Address())
+	client := dialPeer(t, nodes[0].Address())
 	t.Run("advertises self", func(t *testing.T) {
 		response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
 		require.NoError(t, err)
@@ -81,9 +78,9 @@ func (s *WhisperTestSuite) TestSingleNode() {
 
 		self := response.GetSelf()
 		assert.EqualValues(t, whisperv1.PeerStatus_PEER_STATUS_JOINED, self.GetStatus())
-		assert.EqualValues(t, node.ID(), self.GetId())
+		assert.EqualValues(t, nodes[0].ID(), self.GetId())
 		assert.NotEmpty(t, self.GetPublicKey())
-		assert.EqualValues(t, node.Address(), self.GetAddress())
+		assert.EqualValues(t, nodes[0].Address(), self.GetAddress())
 		assert.NotZero(t, self.GetDelta())
 		assert.Nil(t, self.GetMetadata())
 	})
@@ -95,45 +92,10 @@ func (s *WhisperTestSuite) TestMultiNode() {
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	count := uint64(5)
-	nodes := make([]*whisper.Node, count)
+	nodes, _ := createNodes(t, s.logger, 5)
+	closers := runNodes(t, ctx, nodes)
 
-	for i := range count {
-		id := i + 1
-		port := int(8000 + i)
-
-		options := []whisper.Option{
-			whisper.WithLogger(s.logger),
-			whisper.WithPort(port),
-			whisper.WithAddress(fmt.Sprintf("0.0.0.0:%d", port)),
-		}
-
-		if i > 0 {
-			options = append(options, whisper.WithJoinAddress(fmt.Sprintf("0.0.0.0:%d", port-1)))
-		}
-
-		nodes[i] = whisper.New(id, options...)
-	}
-
-	closers := make([]context.CancelFunc, len(nodes))
-	group, gCtx := errgroup.WithContext(ctx)
-	for i, node := range nodes {
-		if i > 0 {
-			<-time.After(time.Second * 5)
-		}
-
-		group.Go(func() error {
-			nCtx, nCancel := context.WithCancel(gCtx)
-			defer nCancel()
-
-			closers[i] = nCancel
-			return node.Run(nCtx)
-		})
-
-		s.Require().NoError(node.Ready(ctx))
-	}
-
-	<-time.After(time.Minute)
+	<-time.After(time.Second * 10)
 
 	t.Run("state is synchronised", func(t *testing.T) {
 		for _, node := range nodes {
@@ -173,7 +135,7 @@ func (s *WhisperTestSuite) TestMultiNode() {
 			t.Run(fmt.Sprintf("from node %d", target.ID()), func(t *testing.T) {
 				require.NoError(t, target.SetMetadata(ctx, expected))
 
-				<-time.After(time.Minute / 2)
+				<-time.After(time.Second * 10)
 				for _, node := range nodes {
 					if node.ID() == target.ID() {
 						continue
@@ -229,8 +191,54 @@ func (s *WhisperTestSuite) TestMultiNode() {
 			})
 		}
 	})
+}
 
-	s.Require().NoError(group.Wait())
+func (s *WhisperTestSuite) TestFailureDetection() {
+	t := s.T()
+
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+
+	curve := ecdh.X25519()
+	nodes, stores := createNodes(t, s.logger, 2)
+	runNodes(t, ctx, nodes)
+
+	deadPeerKey, err := curve.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	deadPeer, err := peer.FromProto(&whisperv1.Peer{
+		Id:        1000,
+		Address:   "0.0.0.0:9000",
+		PublicKey: deadPeerKey.PublicKey().Bytes(),
+		Delta:     time.Now().UnixNano(),
+		Status:    whisperv1.PeerStatus_PEER_STATUS_JOINED,
+	}, curve)
+	require.NoError(t, err)
+
+	for _, st := range stores {
+		require.NoError(t, st.SavePeer(ctx, deadPeer))
+	}
+
+	<-time.After(time.Second * 10)
+
+	t.Run("node is marked as gone", func(t *testing.T) {
+		for _, node := range nodes {
+			t.Run(fmt.Sprintf("on node %d", node.ID()), func(t *testing.T) {
+				client := dialPeer(t, node.Address())
+				response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
+				require.NoError(t, err)
+
+				for _, p := range response.GetPeers() {
+					if p.GetId() != deadPeer.ID {
+						continue
+					}
+
+					assert.EqualValues(t, whisperv1.PeerStatus_PEER_STATUS_GONE, p.GetStatus())
+					break
+				}
+			})
+		}
+	})
 }
 
 func dialPeer(t *testing.T, address string) whispersvcv1.WhisperServiceClient {
@@ -241,4 +249,64 @@ func dialPeer(t *testing.T, address string) whispersvcv1.WhisperServiceClient {
 
 	t.Cleanup(closer)
 	return client
+}
+
+func createNodes(t *testing.T, logger *slog.Logger, count int) ([]*whisper.Node, []whisper.PeerStore) {
+	t.Helper()
+
+	nodes := make([]*whisper.Node, count)
+	stores := make([]whisper.PeerStore, count)
+
+	for i := range count {
+		id := i + 1
+		port := 8000 + i
+
+		st := store.NewInMemoryStore()
+
+		options := []whisper.Option{
+			whisper.WithLogger(logger),
+			whisper.WithPort(port),
+			whisper.WithAddress(fmt.Sprintf("0.0.0.0:%d", port)),
+			whisper.WithStore(st),
+			whisper.WithCheckInterval(time.Second),
+			whisper.WithGossipInterval(time.Second),
+		}
+
+		if i > 0 {
+			options = append(options, whisper.WithJoinAddress(fmt.Sprintf("0.0.0.0:%d", port-1)))
+		}
+
+		nodes[i] = whisper.New(uint64(id), options...)
+		stores[i] = st
+	}
+
+	return nodes, stores
+}
+
+func runNodes(t *testing.T, ctx context.Context, nodes []*whisper.Node) []context.CancelFunc {
+	t.Helper()
+
+	closers := make([]context.CancelFunc, len(nodes))
+	group, gCtx := errgroup.WithContext(ctx)
+	for i, node := range nodes {
+		if i > 0 {
+			<-time.After(time.Second * 5)
+		}
+
+		group.Go(func() error {
+			nCtx, nCancel := context.WithCancel(gCtx)
+			defer nCancel()
+
+			closers[i] = nCancel
+			return node.Run(nCtx)
+		})
+
+		require.NoError(t, node.Ready(ctx))
+	}
+
+	t.Cleanup(func() {
+		assert.NoError(t, group.Wait())
+	})
+
+	return closers
 }

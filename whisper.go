@@ -53,6 +53,10 @@ type (
 		logger      *slog.Logger
 		store       PeerStore
 
+		// Knobs for gossipping
+		gossipInterval time.Duration
+		checkInterval  time.Duration
+
 		// Used for encryption
 		key         *ecdh.PrivateKey
 		curve       ecdh.Curve
@@ -86,18 +90,20 @@ func New(id uint64, options ...Option) *Node {
 	}
 
 	return &Node{
-		id:          id,
-		key:         cfg.key,
-		curve:       cfg.curve,
-		address:     cfg.address,
-		metadata:    cfg.metadata,
-		logger:      cfg.logger,
-		store:       cfg.store,
-		port:        cfg.port,
-		joinAddress: cfg.joinAddress,
-		bytes:       bytepool.New(udpSize),
-		cipherCache: syncmap.New[string, cipher.AEAD](),
-		ready:       make(chan struct{}, 1),
+		id:             id,
+		key:            cfg.key,
+		curve:          cfg.curve,
+		address:        cfg.address,
+		metadata:       cfg.metadata,
+		logger:         cfg.logger,
+		store:          cfg.store,
+		port:           cfg.port,
+		joinAddress:    cfg.joinAddress,
+		gossipInterval: cfg.gossipInterval,
+		checkInterval:  cfg.gossipInterval,
+		bytes:          bytepool.New(udpSize),
+		cipherCache:    syncmap.New[string, cipher.AEAD](),
+		ready:          make(chan struct{}, 1),
 	}
 }
 
@@ -265,6 +271,13 @@ func (n *Node) join(ctx context.Context, self peer.Peer) error {
 		if err = n.store.SavePeer(ctx, p); err != nil {
 			return fmt.Errorf("failed to save peer record: %w", err)
 		}
+	}
+
+	self.Status = peer.StatusJoined
+	self.Delta = time.Now().UnixNano()
+
+	if err = n.store.SavePeer(ctx, self); err != nil {
+		return fmt.Errorf("failed to save local peer record: %w", err)
 	}
 
 	return nil
@@ -563,10 +576,10 @@ func (n *Node) getGCM(p peer.Peer) (cipher.AEAD, error) {
 }
 
 func (n *Node) gossip(ctx context.Context) error {
-	stateTicker := time.NewTicker(time.Second * 5)
+	stateTicker := time.NewTicker(n.gossipInterval)
 	defer stateTicker.Stop()
 
-	checkTicker := time.NewTicker(time.Minute / 2)
+	checkTicker := time.NewTicker(n.checkInterval)
 	defer checkTicker.Stop()
 
 	n.gossiping.Store(true)

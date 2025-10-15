@@ -160,7 +160,7 @@ func TestService_Join(t *testing.T) {
 						Address:   "0.0.0.0:8000",
 						PublicKey: key.PublicKey().Bytes(),
 						Delta:     100,
-						Status:    whisperv1.PeerStatus_PEER_STATUS_JOINED,
+						Status:    whisperv1.PeerStatus_PEER_STATUS_JOINING,
 						Metadata:  mustAny(t, durationpb.New(time.Hour)),
 					},
 				},
