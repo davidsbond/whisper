@@ -50,8 +50,7 @@ func (s *WhisperTestSuite) SetupSuite() {
 
 	s.ctx, s.cancel = signal.NotifyContext(t.Context(), os.Interrupt, os.Kill)
 	s.logger = slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{
-		AddSource: true,
-		Level:     slog.LevelDebug,
+		Level: slog.LevelDebug,
 	}))
 }
 
@@ -264,7 +263,7 @@ func createNodes(t *testing.T, logger *slog.Logger, count int) ([]*whisper.Node,
 		st := store.NewInMemoryStore()
 
 		options := []whisper.Option{
-			whisper.WithLogger(logger),
+			whisper.WithLogger(logger.With("local", id)),
 			whisper.WithPort(port),
 			whisper.WithAddress(fmt.Sprintf("0.0.0.0:%d", port)),
 			whisper.WithStore(st),

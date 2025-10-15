@@ -362,7 +362,7 @@ func (n *Node) listenUDP(ctx context.Context) error {
 			return udp.Close()
 		default:
 			if err = udp.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-				n.logger.With("error", err).Error("failed to set read deadline")
+				n.logger.With("error", err).ErrorContext(ctx, "failed to set read deadline")
 				continue
 			}
 
@@ -375,7 +375,7 @@ func (n *Node) listenUDP(ctx context.Context) error {
 				continue
 			case err != nil:
 				n.bytes.Put(buf)
-				n.logger.With("error", err).Error("failed to read UDP packet")
+				n.logger.With("error", err).ErrorContext(ctx, "failed to read UDP packet")
 				continue
 			}
 
@@ -393,42 +393,44 @@ func (n *Node) listenUDP(ctx context.Context) error {
 func (n *Node) handlePeerMessage(ctx context.Context, payload []byte) {
 	message := &whisperv1.PeerMessage{}
 	if err := proto.Unmarshal(payload, message); err != nil {
-		n.logger.With("error", err).Error("failed to unmarshal peer message")
+		n.logger.With("error", err).ErrorContext(ctx, "failed to unmarshal peer message")
 		return
 	}
 
-	logger := n.logger.With("source_id", message.GetSourceId())
+	logger := n.logger.With("from", message.GetSourceId())
 
 	source, err := n.store.FindPeer(ctx, message.GetSourceId())
 	switch {
 	case errors.Is(err, store.ErrPeerNotFound):
 		return
 	case err != nil:
-		logger.With("error", err).Error("failed to lookup peer")
+		logger.With("error", err).ErrorContext(ctx, "failed to lookup peer")
 		return
 	}
 
 	remote, err := n.decryptPeer(source, message)
 	if err != nil {
-		logger.With("error", err).Error("failed to decrypt peer")
+		logger.With("error", err).ErrorContext(ctx, "failed to decrypt peer")
 		return
 	}
 
-	logger = logger.With("peer_id", remote.ID)
+	logger = logger.With("peer", remote.ID)
+	logger.Debug("received peer message")
 
 	local, err := n.store.FindPeer(ctx, remote.ID)
 	switch {
 	case errors.Is(err, store.ErrPeerNotFound):
 		break
 	case err != nil:
-		logger.With("error", err).Error("failed to lookup peer")
+		logger.With("error", err).ErrorContext(ctx, "failed to lookup peer")
 		return
 	}
 
 	// The inbound peer data is newer than ours, so we should update our local state.
 	if remote.Delta > local.Delta {
+		logger.Debug("received peer update")
 		if err = n.store.SavePeer(ctx, remote); err != nil {
-			logger.With("error", err).Error("failed to save peer")
+			logger.With("error", err).ErrorContext(ctx, "failed to save peer")
 		}
 
 		return
@@ -441,13 +443,13 @@ func (n *Node) handlePeerMessage(ctx context.Context, payload []byte) {
 
 	// In this case, the peer sending the data is out-of-date. So we'll send our local state for this peer
 	// to them.
-	if err = n.sendPeerMessage(source, local); err != nil {
-		logger.With("error", err).Error("failed to send peer message")
+	if err = n.sendPeerMessage(ctx, source, local); err != nil {
+		logger.With("error", err).ErrorContext(ctx, "failed to send peer message")
 		return
 	}
 }
 
-func (n *Node) sendPeerMessage(target, local peer.Peer) error {
+func (n *Node) sendPeerMessage(ctx context.Context, target, local peer.Peer) error {
 	udp, err := net.ResolveUDPAddr("udp", target.Address)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
@@ -475,6 +477,7 @@ func (n *Node) sendPeerMessage(target, local peer.Peer) error {
 		return fmt.Errorf("failed to marshal peer message: %w", err)
 	}
 
+	n.logger.With("to", target.ID, "peer", local.ID).DebugContext(ctx, "sending peer message")
 	if _, err = conn.Write(buf); err != nil {
 		return fmt.Errorf("failed to write peer message: %w", err)
 	}
@@ -592,11 +595,11 @@ func (n *Node) gossip(ctx context.Context) error {
 			return ctx.Err()
 		case <-stateTicker.C:
 			if err := n.shareState(ctx); err != nil {
-				n.logger.With("error", err).Error("failed to share state")
+				n.logger.With("error", err).ErrorContext(ctx, "failed to share state")
 			}
 		case <-checkTicker.C:
 			if err := n.checkPeer(ctx); err != nil {
-				n.logger.With("error", err).Error("failed to check peer")
+				n.logger.With("error", err).ErrorContext(ctx, "failed to check peer")
 			}
 		}
 	}
@@ -612,6 +615,20 @@ func (n *Node) shareState(ctx context.Context) error {
 		return nil
 	}
 
+	n.logger.With("to", target.ID).DebugContext(ctx, "sharing peer state")
+
+	// Update our own delta to latest, this ensures if we have been marked as gone by another peer we'll
+	// overwrite that value
+	self, err := n.store.FindPeer(ctx, n.id)
+	if err != nil {
+		return fmt.Errorf("failed to lookup local peer record: %w", err)
+	}
+
+	self.Delta = time.Now().UnixNano()
+	if err = n.store.SavePeer(ctx, self); err != nil {
+		return fmt.Errorf("failed to save local peer record: %w", err)
+	}
+
 	peers, err := n.store.ListPeers(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list peers: %w", err)
@@ -624,12 +641,7 @@ func (n *Node) shareState(ctx context.Context) error {
 			continue
 		}
 
-		if p.ID == n.id {
-			// If the peer is us, use the latest delta to overwrite if we've previously failed and recovered
-			p.Delta = time.Now().UnixNano()
-		}
-
-		if err = n.sendPeerMessage(target, p); err != nil {
+		if err = n.sendPeerMessage(ctx, target, p); err != nil {
 			return fmt.Errorf("failed to send peer message to peer %q: %w", target.ID, err)
 		}
 	}
@@ -648,6 +660,8 @@ func (n *Node) checkPeer(ctx context.Context) error {
 	}
 
 	const attempts = 3
+
+	n.logger.With("peer", target.ID).DebugContext(ctx, "checking peer liveness")
 
 	client, closer, err := peer.Dial(target.Address)
 	if err != nil {
@@ -693,6 +707,10 @@ func (n *Node) checkPeerViaPeer(ctx context.Context, target peer.Peer, attempts 
 		break
 	}
 
+	n.logger.
+		With("peer", target.ID, "via", selected.ID).
+		DebugContext(ctx, "failed to check peer directly, checking via another peer")
+
 	client, closer, err := peer.Dial(selected.Address)
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
@@ -733,6 +751,8 @@ func (n *Node) markPeerGone(ctx context.Context, target peer.Peer) error {
 		return fmt.Errorf("failed to save peer: %w", err)
 	}
 
+	n.logger.With("peer", target.ID).DebugContext(ctx, "marked peer as gone")
+
 	return nil
 }
 
@@ -742,22 +762,21 @@ func (n *Node) selectPeer(ctx context.Context) (peer.Peer, error) {
 		return peer.Peer{}, err
 	}
 
-	var availablePeers int
+	availablePeers := make([]peer.Peer, 0)
 	for _, p := range peers {
 		if p.ID == n.id || p.Status != peer.StatusJoined {
 			continue
 		}
 
-		availablePeers++
+		availablePeers = append(availablePeers, p)
 	}
 
-	// If we only have one peer, we're a standalone node.
-	if availablePeers == 0 {
+	if len(availablePeers) == 0 {
 		return peer.Peer{}, nil
 	}
 
-	idx := mathrand.IntN(len(peers))
-	target := peers[idx]
+	idx := mathrand.IntN(len(availablePeers))
+	target := availablePeers[idx]
 
 	// We never want to select ourselves or a peer with an inactive status.
 	if target.ID == n.id || target.Status != peer.StatusJoined {
