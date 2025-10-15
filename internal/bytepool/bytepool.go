@@ -17,20 +17,21 @@ func New(length int) *Pool {
 	return &Pool{
 		Pool: sync.Pool{
 			New: func() any {
-				return make([]byte, length)
+				b := make([]byte, length)
+				return &b
 			},
 		},
 	}
 }
 
 // Get a byte slice.
-func (p *Pool) Get() []byte {
-	buf := p.Pool.Get().([]byte)
+func (p *Pool) Get() *[]byte {
+	buf := p.Pool.Get().(*[]byte)
 
 	return buf
 }
 
 // Put a byte slice back into the pool for later use.
-func (p *Pool) Put(buf []byte) {
+func (p *Pool) Put(buf *[]byte) {
 	p.Pool.Put(buf)
 }

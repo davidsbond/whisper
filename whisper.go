@@ -25,6 +25,7 @@ import (
 	mathrand "math/rand/v2"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/hkdf"
@@ -67,9 +68,9 @@ type (
 
 		// Used to signal the node is up and running
 		ready        chan struct{}
-		listeningUDP bool
-		listeningTCP bool
-		gossiping    bool
+		listeningUDP atomic.Bool
+		listeningTCP atomic.Bool
+		gossiping    atomic.Bool
 	}
 )
 
@@ -147,15 +148,17 @@ func (n *Node) Ready(ctx context.Context) error {
 }
 
 func (n *Node) reportReadiness() {
-	if n.gossiping && n.listeningUDP && n.listeningTCP {
+	if n.gossiping.Load() && n.listeningUDP.Load() && n.listeningTCP.Load() {
 		n.ready <- struct{}{}
 	}
 }
 
+// ID returns the node's identifier.
 func (n *Node) ID() uint64 {
 	return n.id
 }
 
+// Address returns the address the node is advertising to peers.
 func (n *Node) Address() string {
 	return n.address
 }
@@ -311,7 +314,7 @@ func (n *Node) listenTCP(ctx context.Context) error {
 	group, ctx := errgroup.WithContext(ctx)
 
 	group.Go(func() error {
-		n.listeningTCP = true
+		n.listeningTCP.Store(true)
 		n.reportReadiness()
 
 		return server.Serve(tcp)
@@ -320,7 +323,7 @@ func (n *Node) listenTCP(ctx context.Context) error {
 	group.Go(func() error {
 		<-ctx.Done()
 
-		n.listeningTCP = false
+		n.listeningTCP.Store(true)
 		server.GracefulStop()
 		return tcp.Close()
 	})
@@ -334,7 +337,7 @@ func (n *Node) listenUDP(ctx context.Context) error {
 		return fmt.Errorf("failed to listen on port %d: %w", n.port, err)
 	}
 
-	n.listeningUDP = true
+	n.listeningUDP.Store(true)
 	n.reportReadiness()
 
 	var (
@@ -347,7 +350,7 @@ func (n *Node) listenUDP(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			n.listeningUDP = false
+			n.listeningUDP.Store(false)
 			return udp.Close()
 		default:
 			if err = udp.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -357,7 +360,7 @@ func (n *Node) listenUDP(ctx context.Context) error {
 
 			buf := n.bytes.Get()
 
-			length, _, err := udp.ReadFromUDP(buf)
+			length, _, err := udp.ReadFromUDP(*buf)
 			switch {
 			case errors.As(err, &netErr) && netErr.Timeout():
 				n.bytes.Put(buf)
@@ -368,12 +371,13 @@ func (n *Node) listenUDP(ctx context.Context) error {
 				continue
 			}
 
+			payload := *buf
 			group.Add(1)
 			go func(payload []byte) {
 				defer group.Done()
 				defer n.bytes.Put(buf)
 				n.handlePeerMessage(ctx, payload)
-			}(buf[:length])
+			}(payload[:length])
 		}
 	}
 }
@@ -570,13 +574,13 @@ func (n *Node) gossip(ctx context.Context) error {
 	checkTicker := time.NewTicker(time.Minute / 2)
 	defer checkTicker.Stop()
 
-	n.gossiping = true
+	n.gossiping.Store(true)
 	n.reportReadiness()
 
 	for {
 		select {
 		case <-ctx.Done():
-			n.gossiping = false
+			n.gossiping.Store(false)
 			return ctx.Err()
 		case <-stateTicker.C:
 			if err := n.shareState(ctx); err != nil {

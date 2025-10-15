@@ -22,7 +22,7 @@ on:
       - '.github/workflows/go.yml'
 
 jobs:
-  mod:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,44 +34,19 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Download Modules
+      - name: Download modules
         run: go mod download
+        
+      - name: Run static analysis
+        run: go tool staticcheck ./...
 
-  test:
-    runs-on: ubuntu-latest
-    needs:
-      - mod
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5.0.0
-
-      - name: Install Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
+      - name: Run generators
+        run: go generate ./...
+        
       - name: Run tests
         run: go test -race ./...
 
-  generate:
-    runs-on: ubuntu-latest
-    needs:
-      - mod
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5.0.0
-
-      - name: Install Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Generate
-        run: go generate ./...
-
-      - name: Check Changes
+      - name: Check for changed files
         run: |
           git add .
           git diff --staged --exit-code
