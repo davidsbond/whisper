@@ -624,6 +624,11 @@ func (n *Node) shareState(ctx context.Context) error {
 			continue
 		}
 
+		if p.ID == n.id {
+			// If the peer is us, use the latest delta to overwrite if we've previously failed and recovered
+			p.Delta = time.Now().UnixNano()
+		}
+
 		if err = n.sendPeerMessage(target, p); err != nil {
 			return fmt.Errorf("failed to send peer message to peer %q: %w", target.ID, err)
 		}
@@ -642,16 +647,18 @@ func (n *Node) checkPeer(ctx context.Context) error {
 		return nil
 	}
 
+	const attempts = 3
+
 	client, closer, err := peer.Dial(target.Address)
 	if err != nil {
-		if err = n.checkPeerViaPeer(ctx, target); err != nil {
+		if err = n.checkPeerViaPeer(ctx, target, attempts); err != nil {
 			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
 		}
 	}
 
 	defer closer()
 	if _, err = client.Status(ctx, &whispersvcv1.StatusRequest{}); err != nil {
-		if err = n.checkPeerViaPeer(ctx, target); err != nil {
+		if err = n.checkPeerViaPeer(ctx, target, attempts); err != nil {
 			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
 		}
 	}
@@ -659,7 +666,11 @@ func (n *Node) checkPeer(ctx context.Context) error {
 	return nil
 }
 
-func (n *Node) checkPeerViaPeer(ctx context.Context, target peer.Peer) error {
+func (n *Node) checkPeerViaPeer(ctx context.Context, target peer.Peer, attempts uint) error {
+	if attempts == 0 {
+		return errors.New("failed to check peer via peer after multiple attempts")
+	}
+
 	var selected peer.Peer
 
 	for {
@@ -690,17 +701,25 @@ func (n *Node) checkPeerViaPeer(ctx context.Context, target peer.Peer) error {
 	defer closer()
 	_, err = client.Check(ctx, &whispersvcv1.CheckRequest{Id: target.ID})
 	switch status.Code(err) {
-	case codes.OK, codes.FailedPrecondition:
+	case codes.FailedPrecondition:
 		// We'll get a FailedPrecondition if the target peer has already left or marked as failed within the
 		// selected peer's state.
 		return nil
-	case codes.NotFound:
-		// The peer we called doesn't have the target peer in their state, try another peer
-		return n.checkPeerViaPeer(ctx, target)
-	default:
+	case codes.NotFound, codes.Unavailable:
+		// We either failed to dial this peer or the peer we called doesn't have the target peer in their state,
+		// try another peer.
+		return n.checkPeerViaPeer(ctx, target, attempts-1)
+	case codes.Internal:
+		// If the upstream peer can't reach the peer we want to check, it returns an Internal.
 		if err = n.markPeerGone(ctx, target); err != nil {
 			return fmt.Errorf("failed to mark peer %q as gone: %w", target.ID, err)
 		}
+
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("unexpected error checking peer %q: %w", target.ID, err)
 	}
 
 	return nil
