@@ -166,17 +166,12 @@ func (n *Node) Address() string {
 // SetMetadata updates the metadata on the Node. This causes a delta update which will be propagated out to the
 // gossip network.
 func (n *Node) SetMetadata(ctx context.Context, message proto.Message) error {
-	metadata, err := anypb.New(message)
-	if err != nil {
-		return fmt.Errorf("invalid metadata: %w", err)
-	}
-
 	self, err := n.store.FindPeer(ctx, n.id)
 	if err != nil {
 		return fmt.Errorf("failed to lookup local peer record: %w", err)
 	}
 
-	self.Metadata = metadata
+	self.Metadata = message
 	self.Delta = time.Now().UnixNano()
 
 	if err = n.store.SavePeer(ctx, self); err != nil {
@@ -325,7 +320,7 @@ func (n *Node) listenTCP(ctx context.Context) error {
 
 		n.listeningTCP.Store(true)
 		server.GracefulStop()
-		return tcp.Close()
+		return nil
 	})
 
 	return group.Wait()

@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/davidsbond/whisper"
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
@@ -69,11 +71,7 @@ func (s *WhisperTestSuite) TestSingleNode() {
 
 	s.Require().NoError(node.Ready(ctx))
 
-	client, closer, err := peer.Dial(node.Address())
-	s.Require().NoError(err)
-
-	defer closer()
-
+	client := dialPeer(t, node.Address())
 	t.Run("advertises self", func(t *testing.T) {
 		response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
 		require.NoError(t, err)
@@ -97,10 +95,9 @@ func (s *WhisperTestSuite) TestMultiNode() {
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	count := uint64(3)
+	count := uint64(5)
 	nodes := make([]*whisper.Node, count)
 
-	t.Logf("testing with %d nodes", count)
 	for i := range count {
 		id := i + 1
 		port := int(8000 + i)
@@ -112,7 +109,7 @@ func (s *WhisperTestSuite) TestMultiNode() {
 		}
 
 		if i > 0 {
-			options = append(options, whisper.WithJoinAddress("0.0.0.0:8000"))
+			options = append(options, whisper.WithJoinAddress(fmt.Sprintf("0.0.0.0:%d", port-1)))
 		}
 
 		nodes[i] = whisper.New(id, options...)
@@ -125,7 +122,6 @@ func (s *WhisperTestSuite) TestMultiNode() {
 			<-time.After(time.Second * 5)
 		}
 
-		t.Logf("starting node %d", node.ID())
 		group.Go(func() error {
 			nCtx, nCancel := context.WithCancel(gCtx)
 			defer nCancel()
@@ -137,66 +133,112 @@ func (s *WhisperTestSuite) TestMultiNode() {
 		s.Require().NoError(node.Ready(ctx))
 	}
 
-	t.Log("all nodes started & ready, allowing time for state to synchronise")
-	<-time.After(time.Minute / 2)
+	<-time.After(time.Minute)
 
-	for _, node := range nodes {
-		t.Run(fmt.Sprintf("node %d has full state", node.ID()), func(t *testing.T) {
-			client, closer, err := peer.Dial(node.Address())
-			require.NoError(t, err)
-			defer closer()
-
-			response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
-			require.NoError(t, err)
-			require.Len(t, response.GetPeers(), len(nodes)-1)
-		})
-
-		t.Run(fmt.Sprintf("node %d can check peers", node.ID()), func(t *testing.T) {
-			client, closer, err := peer.Dial(node.Address())
-			require.NoError(t, err)
-			defer closer()
-
-			for _, target := range nodes {
-				if target.ID() == node.ID() {
-					continue
-				}
-
-				_, err = client.Check(ctx, &whispersvcv1.CheckRequest{Id: target.ID()})
-				require.NoError(t, err)
-			}
-		})
-	}
-
-	for i, node := range nodes {
-		t.Run(fmt.Sprintf("node %d can leave gracefully", node.ID()), func(t *testing.T) {
-			t.Logf("shutting down node %d", node.ID())
-
-			closers[i]()
-			<-time.After(time.Second * 10)
-			for _, target := range nodes {
-				if target.ID() <= node.ID() {
-					continue
-				}
-
-				client, closer, err := peer.Dial(target.Address())
-				require.NoError(t, err)
+	t.Run("state is synchronised", func(t *testing.T) {
+		for _, node := range nodes {
+			t.Run(fmt.Sprintf("on node %d", node.ID()), func(t *testing.T) {
+				client := dialPeer(t, node.Address())
 
 				response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
 				require.NoError(t, err)
+				require.Len(t, response.GetPeers(), len(nodes)-1)
+			})
+		}
+	})
 
-				for _, p := range response.GetPeers() {
-					if p.GetId() != node.ID() {
+	t.Run("liveness can be checked", func(t *testing.T) {
+		for _, node := range nodes {
+			t.Run(fmt.Sprintf("from node %d", node.ID()), func(t *testing.T) {
+				client := dialPeer(t, node.Address())
+
+				for _, target := range nodes {
+					if target.ID() == node.ID() {
 						continue
 					}
 
-					assert.EqualValues(t, whisperv1.PeerStatus_PEER_STATUS_LEFT, p.GetStatus())
-					break
+					t.Run(fmt.Sprintf("to node %d", target.ID()), func(t *testing.T) {
+						_, err := client.Check(ctx, &whispersvcv1.CheckRequest{Id: target.ID()})
+						require.NoError(t, err)
+					})
 				}
+			})
+		}
+	})
 
-				closer()
-			}
-		})
-	}
+	t.Run("metadata updates are propagated", func(t *testing.T) {
+		for _, target := range nodes {
+			expected := timestamppb.Now()
+
+			t.Run(fmt.Sprintf("from node %d", target.ID()), func(t *testing.T) {
+				require.NoError(t, target.SetMetadata(ctx, expected))
+
+				<-time.After(time.Minute / 2)
+				for _, node := range nodes {
+					if node.ID() == target.ID() {
+						continue
+					}
+
+					t.Run(fmt.Sprintf("to node %d", node.ID()), func(t *testing.T) {
+						client := dialPeer(t, node.Address())
+
+						response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
+						require.NoError(t, err)
+
+						for _, p := range response.GetPeers() {
+							if p.GetId() != target.ID() {
+								continue
+							}
+
+							actual, err := p.GetMetadata().UnmarshalNew()
+							require.NoError(t, err)
+							assert.True(t, proto.Equal(expected, actual))
+						}
+					})
+				}
+			})
+		}
+	})
+
+	t.Run("graceful shutdown", func(t *testing.T) {
+		for i, node := range nodes {
+			t.Run(fmt.Sprintf("on node %d", node.ID()), func(t *testing.T) {
+				closers[i]()
+				<-time.After(time.Second * 10)
+				for _, target := range nodes {
+					if target.ID() <= node.ID() {
+						continue
+					}
+
+					t.Run(fmt.Sprintf("detected by node %d", target.ID()), func(t *testing.T) {
+						client := dialPeer(t, target.Address())
+
+						response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
+						require.NoError(t, err)
+
+						for _, p := range response.GetPeers() {
+							if p.GetId() != node.ID() {
+								continue
+							}
+
+							assert.EqualValues(t, whisperv1.PeerStatus_PEER_STATUS_LEFT, p.GetStatus())
+							break
+						}
+					})
+				}
+			})
+		}
+	})
 
 	s.Require().NoError(group.Wait())
+}
+
+func dialPeer(t *testing.T, address string) whispersvcv1.WhisperServiceClient {
+	t.Helper()
+
+	client, closer, err := peer.Dial(address)
+	require.NoError(t, err)
+
+	t.Cleanup(closer)
+	return client
 }
