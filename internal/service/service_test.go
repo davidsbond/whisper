@@ -3,6 +3,7 @@ package service_test
 import (
 	"crypto/ecdh"
 	"crypto/rand"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -25,6 +26,8 @@ func TestService_Join(t *testing.T) {
 	t.Parallel()
 
 	key := testKey(t)
+	logger := testLogger(t)
+	curve := ecdh.X25519()
 
 	tt := []struct {
 		Name         string
@@ -175,7 +178,7 @@ func TestService_Join(t *testing.T) {
 				tc.Setup(s)
 			}
 
-			response, err := service.New(tc.ID, s, ecdh.X25519()).Join(t.Context(), tc.Request)
+			response, err := service.New(tc.ID, s, curve, logger).Join(t.Context(), tc.Request)
 			if tc.ExpectsError {
 				require.Error(t, err)
 				assert.Nil(t, response)
@@ -213,4 +216,11 @@ func mustAny(t *testing.T, v proto.Message) *anypb.Any {
 	a, err := anypb.New(v)
 	require.NoError(t, err)
 	return a
+}
+
+func testLogger(t *testing.T) *slog.Logger {
+	return slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{
+		AddSource: testing.Verbose(),
+		Level:     slog.LevelDebug,
+	}))
 }

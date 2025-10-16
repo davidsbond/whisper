@@ -100,7 +100,7 @@ func New(id uint64, options ...Option) *Node {
 		port:           cfg.port,
 		joinAddress:    cfg.joinAddress,
 		gossipInterval: cfg.gossipInterval,
-		checkInterval:  cfg.gossipInterval,
+		checkInterval:  cfg.checkInterval,
 		bytes:          bytepool.New(udpSize),
 		cipherCache:    syncmap.New[string, cipher.AEAD](),
 		ready:          make(chan struct{}, 1),
@@ -113,21 +113,28 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to bootstrap peer: %w", err)
 	}
 
+	// We use a cancellable context here so that we can shut everything down once n.leave() has returned. This will
+	// increase the likelihood of our "leaving" state being propagated as well as status checks working until we're
+	// truly out of the network.
+	nCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	group, ctx := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		return n.listenTCP(ctx)
+		return n.listenTCP(nCtx)
 	})
 
 	group.Go(func() error {
-		return n.listenUDP(ctx)
+		return n.listenUDP(nCtx)
 	})
 
 	group.Go(func() error {
-		return n.gossip(ctx)
+		return n.gossip(nCtx)
 	})
 
 	group.Go(func() error {
 		<-ctx.Done()
+		defer cancel()
 		defer close(n.ready)
 		return n.leave()
 	})
@@ -273,11 +280,8 @@ func (n *Node) join(ctx context.Context, self peer.Peer) error {
 		}
 	}
 
-	self.Status = peer.StatusJoined
-	self.Delta = time.Now().UnixNano()
-
-	if err = n.store.SavePeer(ctx, self); err != nil {
-		return fmt.Errorf("failed to save local peer record: %w", err)
+	if err = n.setStatus(ctx, peer.StatusJoined); err != nil {
+		return fmt.Errorf("failed to set joined status: %w", err)
 	}
 
 	return nil
@@ -286,6 +290,10 @@ func (n *Node) join(ctx context.Context, self peer.Peer) error {
 func (n *Node) leave() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+
+	if err := n.setStatus(ctx, peer.StatusLeaving); err != nil {
+		return fmt.Errorf("failed to set leaving status: %w", err)
+	}
 
 	selected, err := n.selectPeer(ctx)
 	if err != nil {
@@ -307,6 +315,26 @@ func (n *Node) leave() error {
 		return fmt.Errorf("failed to send leave request: %w", err)
 	}
 
+	if err = n.setStatus(ctx, peer.StatusLeft); err != nil {
+		return fmt.Errorf("failed to set left status: %w", err)
+	}
+
+	return nil
+}
+
+func (n *Node) setStatus(ctx context.Context, status peer.Status) error {
+	self, err := n.store.FindPeer(ctx, n.id)
+	if err != nil {
+		return fmt.Errorf("failed to lookup local peer record: %w", err)
+	}
+
+	self.Status = status
+	self.Delta = time.Now().UnixNano()
+
+	if err = n.store.SavePeer(ctx, self); err != nil {
+		return fmt.Errorf("failed to save local peer record: %w", err)
+	}
+
 	return nil
 }
 
@@ -317,7 +345,7 @@ func (n *Node) listenTCP(ctx context.Context) error {
 	}
 
 	server := grpc.NewServer()
-	service.New(n.id, n.store, n.curve).Register(server)
+	service.New(n.id, n.store, n.curve, n.logger).Register(server)
 
 	group, ctx := errgroup.WithContext(ctx)
 
@@ -415,7 +443,6 @@ func (n *Node) handlePeerMessage(ctx context.Context, payload []byte) {
 	}
 
 	logger = logger.With("peer", remote.ID)
-	logger.Debug("received peer message")
 
 	local, err := n.store.FindPeer(ctx, remote.ID)
 	switch {
@@ -428,7 +455,15 @@ func (n *Node) handlePeerMessage(ctx context.Context, payload []byte) {
 
 	// The inbound peer data is newer than ours, so we should update our local state.
 	if remote.Delta > local.Delta {
-		logger.Debug("received peer update")
+		// A peer may have decided that the remote peer has failed when in fact it has left gracefully and the
+		// sender has yet to receive the update. We guard against this here by checking if our local state
+		// is StatusLeft and the remote state is StatusGone. If so, persist the StatusLeft status and update
+		// the delta of the peer.
+		if remote.Status == peer.StatusGone && (local.Status == peer.StatusLeft) {
+			remote.Status = local.Status
+			remote.Delta = time.Now().UnixNano()
+		}
+
 		if err = n.store.SavePeer(ctx, remote); err != nil {
 			logger.With("error", err).ErrorContext(ctx, "failed to save peer")
 		}
@@ -443,13 +478,13 @@ func (n *Node) handlePeerMessage(ctx context.Context, payload []byte) {
 
 	// In this case, the peer sending the data is out-of-date. So we'll send our local state for this peer
 	// to them.
-	if err = n.sendPeerMessage(ctx, source, local); err != nil {
+	if err = n.sendPeerMessage(source, local); err != nil {
 		logger.With("error", err).ErrorContext(ctx, "failed to send peer message")
 		return
 	}
 }
 
-func (n *Node) sendPeerMessage(ctx context.Context, target, local peer.Peer) error {
+func (n *Node) sendPeerMessage(target, local peer.Peer) error {
 	udp, err := net.ResolveUDPAddr("udp", target.Address)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
@@ -477,7 +512,6 @@ func (n *Node) sendPeerMessage(ctx context.Context, target, local peer.Peer) err
 		return fmt.Errorf("failed to marshal peer message: %w", err)
 	}
 
-	n.logger.With("to", target.ID, "peer", local.ID).DebugContext(ctx, "sending peer message")
 	if _, err = conn.Write(buf); err != nil {
 		return fmt.Errorf("failed to write peer message: %w", err)
 	}
@@ -615,8 +649,6 @@ func (n *Node) shareState(ctx context.Context) error {
 		return nil
 	}
 
-	n.logger.With("to", target.ID).DebugContext(ctx, "sharing peer state")
-
 	// Update our own delta to latest, this ensures if we have been marked as gone by another peer we'll
 	// overwrite that value
 	self, err := n.store.FindPeer(ctx, n.id)
@@ -641,7 +673,7 @@ func (n *Node) shareState(ctx context.Context) error {
 			continue
 		}
 
-		if err = n.sendPeerMessage(ctx, target, p); err != nil {
+		if err = n.sendPeerMessage(target, p); err != nil {
 			return fmt.Errorf("failed to send peer message to peer %q: %w", target.ID, err)
 		}
 	}
@@ -659,20 +691,16 @@ func (n *Node) checkPeer(ctx context.Context) error {
 		return nil
 	}
 
-	const attempts = 3
-
-	n.logger.With("peer", target.ID).DebugContext(ctx, "checking peer liveness")
-
 	client, closer, err := peer.Dial(target.Address)
 	if err != nil {
-		if err = n.checkPeerViaPeer(ctx, target, attempts); err != nil {
+		if err = n.checkPeerViaPeers(ctx, target); err != nil {
 			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
 		}
 	}
 
 	defer closer()
 	if _, err = client.Status(ctx, &whispersvcv1.StatusRequest{}); err != nil {
-		if err = n.checkPeerViaPeer(ctx, target, attempts); err != nil {
+		if err = n.checkPeerViaPeers(ctx, target); err != nil {
 			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
 		}
 	}
@@ -680,67 +708,63 @@ func (n *Node) checkPeer(ctx context.Context) error {
 	return nil
 }
 
-func (n *Node) checkPeerViaPeer(ctx context.Context, target peer.Peer, attempts uint) error {
-	if attempts == 0 {
-		return errors.New("failed to check peer via peer after multiple attempts")
+func (n *Node) checkPeerViaPeers(ctx context.Context, target peer.Peer) error {
+	checkVia, err := n.selectPeersExcept(ctx, 3, target.ID)
+	if err != nil {
+		return fmt.Errorf("failed to select peers: %w", err)
 	}
 
-	var selected peer.Peer
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			checker, err := n.selectPeer(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to select peer: %w", err)
-			}
-
-			if checker.ID == target.ID {
-				continue
-			}
-
-			selected = checker
+	for _, via := range checkVia {
+		reached, err := n.checkPeerViaPeer(ctx, target, via)
+		if err != nil {
+			return fmt.Errorf("failed to check peer %q via peer %q: %w", target.ID, via.ID, err)
 		}
 
-		break
+		// At least one of our selected peers was able to reach the target peer. Or they had an entry for that peer
+		// already in a gone/left state. So we don't update our local state and await an update from another peer.
+		if reached {
+			return nil
+		}
 	}
 
 	n.logger.
-		With("peer", target.ID, "via", selected.ID).
-		DebugContext(ctx, "failed to check peer directly, checking via another peer")
+		With("peer", target.ID, "via_count", len(checkVia)).
+		WarnContext(ctx, "peer was unavailable via other peers, marking as gone")
 
-	client, closer, err := peer.Dial(selected.Address)
+	if err = n.markPeerGone(ctx, target); err != nil {
+		return fmt.Errorf("failed to mark peer %q as gone: %w", target.ID, err)
+	}
+
+	return nil
+}
+
+func (n *Node) checkPeerViaPeer(ctx context.Context, target peer.Peer, via peer.Peer) (bool, error) {
+	n.logger.
+		With("peer", target.ID, "via", via.ID).
+		WarnContext(ctx, "failed to check peer liveness directly, checking via another peer")
+
+	client, closer, err := peer.Dial(via.Address)
 	if err != nil {
-		return fmt.Errorf("failed to dial peer: %w", err)
+		return false, fmt.Errorf("failed to dial peer: %w", err)
 	}
 
 	defer closer()
 	_, err = client.Check(ctx, &whispersvcv1.CheckRequest{Id: target.ID})
 	switch status.Code(err) {
-	case codes.FailedPrecondition:
-		// We'll get a FailedPrecondition if the target peer has already left or marked as failed within the
-		// selected peer's state.
-		return nil
-	case codes.NotFound, codes.Unavailable:
-		// We either failed to dial this peer or the peer we called doesn't have the target peer in their state,
-		// try another peer.
-		return n.checkPeerViaPeer(ctx, target, attempts-1)
+	// These four error codes indicate no action is required on our part for this peer:
+	// * OK						The target peer is reachable from the checking peer.
+	// * FailedPrecondition		The target peer is already marked as left/gone in the checking peer's state.
+	// * Unavailable			We failed to reach the checking peer, so we don't have a definite answer.
+	// * NotFound				The checking peer has no record of the target peer, another indefinite answer.
+	case codes.OK, codes.FailedPrecondition, codes.Unavailable, codes.NotFound:
+		return true, nil
 	case codes.Internal:
-		// If the upstream peer can't reach the peer we want to check, it returns an Internal.
-		if err = n.markPeerGone(ctx, target); err != nil {
-			return fmt.Errorf("failed to mark peer %q as gone: %w", target.ID, err)
-		}
-
-		return nil
+		// We get an internal if the peer we've dialed cannot communicate with the specified peer.
+		return false, nil
+	default:
+		// All other status codes are unexpected. We report that.
+		return false, fmt.Errorf("unexpected error checking peer %q: %w", target.ID, err)
 	}
-
-	if err != nil {
-		return fmt.Errorf("unexpected error checking peer %q: %w", target.ID, err)
-	}
-
-	return nil
 }
 
 func (n *Node) markPeerGone(ctx context.Context, target peer.Peer) error {
@@ -751,9 +775,36 @@ func (n *Node) markPeerGone(ctx context.Context, target peer.Peer) error {
 		return fmt.Errorf("failed to save peer: %w", err)
 	}
 
-	n.logger.With("peer", target.ID).DebugContext(ctx, "marked peer as gone")
-
 	return nil
+}
+
+func (n *Node) selectPeersExcept(ctx context.Context, count int, exclude uint64) ([]peer.Peer, error) {
+	peers, err := n.store.ListPeers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list peers: %w", err)
+	}
+
+	availablePeers := make([]peer.Peer, 0)
+	for _, p := range peers {
+		// We only want active peers that do not match our own id or the excluded id.
+		if p.ID == n.id || p.Status != peer.StatusJoined || p.ID == exclude {
+			continue
+		}
+
+		availablePeers = append(availablePeers, p)
+	}
+
+	// If we have less available peers than the desired count, just return them all.
+	if len(availablePeers) <= count {
+		return availablePeers, nil
+	}
+
+	// Otherwise, shuffle them randomly and return up to "count".
+	mathrand.Shuffle(len(availablePeers), func(i, j int) {
+		availablePeers[i], availablePeers[j] = availablePeers[j], availablePeers[i]
+	})
+
+	return availablePeers[:count], nil
 }
 
 func (n *Node) selectPeer(ctx context.Context) (peer.Peer, error) {

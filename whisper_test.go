@@ -45,16 +45,16 @@ func TestWhisper(t *testing.T) {
 	suite.Run(t, new(WhisperTestSuite))
 }
 
-func (s *WhisperTestSuite) SetupSuite() {
+func (s *WhisperTestSuite) SetupTest() {
 	t := s.T()
 
 	s.ctx, s.cancel = signal.NotifyContext(t.Context(), os.Interrupt, os.Kill)
 	s.logger = slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{
 		Level: slog.LevelDebug,
-	}))
+	})).With("test", t.Name())
 }
 
-func (s *WhisperTestSuite) TearDownSuite() {
+func (s *WhisperTestSuite) TeardownTest() {
 	s.cancel()
 }
 
@@ -185,6 +185,8 @@ func (s *WhisperTestSuite) TestMultiNode() {
 							assert.EqualValues(t, whisperv1.PeerStatus_PEER_STATUS_LEFT, p.GetStatus())
 							break
 						}
+
+						<-time.After(time.Second * 10)
 					})
 				}
 			})
@@ -218,7 +220,7 @@ func (s *WhisperTestSuite) TestFailureDetection() {
 		require.NoError(t, st.SavePeer(ctx, deadPeer))
 	}
 
-	<-time.After(time.Second * 10)
+	<-time.After(time.Minute / 2)
 
 	t.Run("node is marked as gone", func(t *testing.T) {
 		for _, node := range nodes {
@@ -267,7 +269,7 @@ func createNodes(t *testing.T, logger *slog.Logger, count int) ([]*whisper.Node,
 			whisper.WithPort(port),
 			whisper.WithAddress(fmt.Sprintf("0.0.0.0:%d", port)),
 			whisper.WithStore(st),
-			whisper.WithCheckInterval(time.Second),
+			whisper.WithCheckInterval(time.Second * 10),
 			whisper.WithGossipInterval(time.Second),
 		}
 

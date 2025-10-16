@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"time"
 
@@ -26,9 +27,10 @@ type (
 	Service struct {
 		whispersvcv1.UnimplementedWhisperServiceServer
 
-		id    uint64
-		peers PeerStore
-		curve ecdh.Curve
+		id     uint64
+		peers  PeerStore
+		curve  ecdh.Curve
+		logger *slog.Logger
 	}
 
 	// The PeerStore interface describes types that persist the current state of all peers within the gossip network.
@@ -44,11 +46,12 @@ type (
 )
 
 // New returns a new instance of the Service type that will persist peer data using the provided PeerStore implementation.
-func New(id uint64, peers PeerStore, curve ecdh.Curve) *Service {
+func New(id uint64, peers PeerStore, curve ecdh.Curve, logger *slog.Logger) *Service {
 	return &Service{
-		id:    id,
-		peers: peers,
-		curve: curve,
+		id:     id,
+		peers:  peers,
+		curve:  curve,
+		logger: logger,
 	}
 }
 
@@ -87,6 +90,8 @@ func (svc *Service) Join(ctx context.Context, r *whispersvcv1.JoinRequest) (*whi
 	if err = svc.peers.SavePeer(ctx, p); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to save peer: %v", err)
 	}
+
+	svc.logger.With("peer", r.GetPeer().GetId()).DebugContext(ctx, "received join request from peer")
 
 	peers, err := svc.peers.ListPeers(ctx)
 	if err != nil {
@@ -160,6 +165,8 @@ func (svc *Service) Leave(ctx context.Context, r *whispersvcv1.LeaveRequest) (*w
 		return nil, status.Errorf(codes.Internal, "failed to save peer %q: %v", r.GetId(), err)
 	}
 
+	svc.logger.With("peer", r.GetId()).DebugContext(ctx, "peer is leaving gossip network")
+
 	return &whispersvcv1.LeaveResponse{}, nil
 }
 
@@ -212,7 +219,7 @@ func (svc *Service) Check(ctx context.Context, r *whispersvcv1.CheckRequest) (*w
 	case errors.Is(err, store.ErrPeerNotFound):
 		return nil, status.Errorf(codes.NotFound, "peer %q not found", r.GetId())
 	case err != nil:
-		return nil, status.Errorf(codes.Internal, "failed to lookup peer %q: %v", r.GetId(), err)
+		return nil, status.Errorf(codes.FailedPrecondition, "failed to lookup peer %q: %v", r.GetId(), err)
 	}
 
 	if target.Status == peer.StatusLeft || target.Status == peer.StatusGone {

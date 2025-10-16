@@ -38,11 +38,13 @@ const (
 	// PEER_STATUS_JOINED denotes that a peer has successfully joined the gossip network and is sharing data among
 	// peers.
 	PeerStatus_PEER_STATUS_JOINED PeerStatus = 2
+	// PEER_STATUS_LEAVING denotes that a peer is leaving the gossip network.
+	PeerStatus_PEER_STATUS_LEAVING PeerStatus = 3
 	// PEER_STATUS_LEFT denotes that a peer has left the gossip network and should not be contacted for further updates.
-	PeerStatus_PEER_STATUS_LEFT PeerStatus = 3
+	PeerStatus_PEER_STATUS_LEFT PeerStatus = 4
 	// PEER_STATUS_GONE denotes that a peer has not sent an update to another peer in a large enough period of time to
 	// be considered offline.
-	PeerStatus_PEER_STATUS_GONE PeerStatus = 4
+	PeerStatus_PEER_STATUS_GONE PeerStatus = 5
 )
 
 // Enum value maps for PeerStatus.
@@ -51,15 +53,17 @@ var (
 		0: "PEER_STATUS_UNSPECIFIED",
 		1: "PEER_STATUS_JOINING",
 		2: "PEER_STATUS_JOINED",
-		3: "PEER_STATUS_LEFT",
-		4: "PEER_STATUS_GONE",
+		3: "PEER_STATUS_LEAVING",
+		4: "PEER_STATUS_LEFT",
+		5: "PEER_STATUS_GONE",
 	}
 	PeerStatus_value = map[string]int32{
 		"PEER_STATUS_UNSPECIFIED": 0,
 		"PEER_STATUS_JOINING":     1,
 		"PEER_STATUS_JOINED":      2,
-		"PEER_STATUS_LEFT":        3,
-		"PEER_STATUS_GONE":        4,
+		"PEER_STATUS_LEAVING":     3,
+		"PEER_STATUS_LEFT":        4,
+		"PEER_STATUS_GONE":        5,
 	}
 )
 
@@ -267,14 +271,15 @@ const file_whisper_v1_whisper_proto_rawDesc = "" +
 	"\x05nonce\x18\x02 \x01(\fR\x05nonce\x12\x1e\n" +
 	"\n" +
 	"ciphertext\x18\x03 \x01(\fR\n" +
-	"ciphertext*\x86\x01\n" +
+	"ciphertext*\x9f\x01\n" +
 	"\n" +
 	"PeerStatus\x12\x1b\n" +
 	"\x17PEER_STATUS_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13PEER_STATUS_JOINING\x10\x01\x12\x16\n" +
-	"\x12PEER_STATUS_JOINED\x10\x02\x12\x14\n" +
-	"\x10PEER_STATUS_LEFT\x10\x03\x12\x14\n" +
-	"\x10PEER_STATUS_GONE\x10\x04BMZKgithub.com/davidsbond/whisper/internal/generated/proto/whisper/v1;whisperv1b\x06proto3"
+	"\x12PEER_STATUS_JOINED\x10\x02\x12\x17\n" +
+	"\x13PEER_STATUS_LEAVING\x10\x03\x12\x14\n" +
+	"\x10PEER_STATUS_LEFT\x10\x04\x12\x14\n" +
+	"\x10PEER_STATUS_GONE\x10\x05BMZKgithub.com/davidsbond/whisper/internal/generated/proto/whisper/v1;whisperv1b\x06proto3"
 
 var (
 	file_whisper_v1_whisper_proto_rawDescOnce sync.Once

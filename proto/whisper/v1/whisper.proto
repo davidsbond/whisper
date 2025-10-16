@@ -36,11 +36,13 @@ enum PeerStatus {
   // PEER_STATUS_JOINED denotes that a peer has successfully joined the gossip network and is sharing data among
   // peers.
   PEER_STATUS_JOINED = 2;
+  // PEER_STATUS_LEAVING denotes that a peer is leaving the gossip network.
+  PEER_STATUS_LEAVING = 3;
   // PEER_STATUS_LEFT denotes that a peer has left the gossip network and should not be contacted for further updates.
-  PEER_STATUS_LEFT = 3;
+  PEER_STATUS_LEFT = 4;
   // PEER_STATUS_GONE denotes that a peer has not sent an update to another peer in a large enough period of time to
   // be considered offline.
-  PEER_STATUS_GONE = 4;
+  PEER_STATUS_GONE = 5;
 }
 
 // The PeerMessage type is sent from peer to peer via UDP and contains encrypted data on a single peer within

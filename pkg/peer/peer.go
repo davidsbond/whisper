@@ -79,6 +79,8 @@ const (
 	StatusJoining
 	// StatusJoined describes a peer that is actively participating in the gossip network.
 	StatusJoined
+	// StatusLeaving describes a peer currently attempting to leave the gossip network.
+	StatusLeaving
 	// StatusLeft describes a peer that has left the gossip network.
 	StatusLeft
 	// StatusGone describes a peer that may have failed and is no longer accessible within the gossip network.
