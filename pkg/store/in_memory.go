@@ -63,3 +63,14 @@ func (s *InMemoryStore) ListPeers(ctx context.Context) ([]peer.Peer, error) {
 
 	return peers, ctx.Err()
 }
+
+// RemovePeer removes a specified peer from the store. Returns ErrPeerNotFound if a peer with a matching id does not
+// exist.
+func (s *InMemoryStore) RemovePeer(ctx context.Context, id uint64) error {
+	if _, ok := s.peers.Get(id); !ok {
+		return ErrPeerNotFound
+	}
+
+	s.peers.Remove(id)
+	return ctx.Err()
+}

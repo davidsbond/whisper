@@ -58,11 +58,12 @@ type (
 		// Knobs for gossipping
 		gossipInterval time.Duration
 		checkInterval  time.Duration
+		reapInterval   time.Duration
 
 		// Used for encryption
-		key         *ecdh.PrivateKey
-		curve       ecdh.Curve
-		cipherCache *syncmap.Map[string, cipher.AEAD]
+		key     *ecdh.PrivateKey
+		curve   ecdh.Curve
+		ciphers *syncmap.Map[string, cipher.AEAD]
 
 		// Advertised to other peers
 		address  string
@@ -105,10 +106,11 @@ func New(id uint64, options ...Option) *Node {
 		joinAddress:    cfg.joinAddress,
 		gossipInterval: cfg.gossipInterval,
 		checkInterval:  cfg.checkInterval,
+		reapInterval:   cfg.reapInterval,
 		clientTLS:      cfg.clientTLS,
 		serverTLS:      cfg.serverTLS,
 		bytes:          bytepool.New(udpSize),
-		cipherCache:    syncmap.New[string, cipher.AEAD](),
+		ciphers:        syncmap.New[string, cipher.AEAD](),
 		ready:          make(chan struct{}, 1),
 	}
 }
@@ -573,7 +575,7 @@ func (n *Node) encryptPeer(target, p peer.Peer) (nonce, ciphertext []byte, err e
 
 func (n *Node) getGCM(p peer.Peer) (cipher.AEAD, error) {
 	hash := p.Hash()
-	if gcm, ok := n.cipherCache.Get(hash); ok {
+	if gcm, ok := n.ciphers.Get(hash); ok {
 		return gcm, nil
 	}
 
@@ -598,7 +600,7 @@ func (n *Node) getGCM(p peer.Peer) (cipher.AEAD, error) {
 		return nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
 
-	n.cipherCache.Put(hash, gcm)
+	n.ciphers.Put(hash, gcm)
 	return gcm, nil
 }
 
@@ -608,6 +610,9 @@ func (n *Node) gossip(ctx context.Context) error {
 
 	checkTicker := time.NewTicker(n.checkInterval)
 	defer checkTicker.Stop()
+
+	reapTicker := time.NewTicker(n.reapInterval)
+	defer reapTicker.Stop()
 
 	n.gossiping.Store(true)
 	n.reportReadiness()
@@ -624,6 +629,10 @@ func (n *Node) gossip(ctx context.Context) error {
 		case <-checkTicker.C:
 			if err := n.checkPeer(ctx); err != nil {
 				n.logger.With("error", err).ErrorContext(ctx, "failed to check peer")
+			}
+		case <-reapTicker.C:
+			if err := n.reap(ctx); err != nil {
+				n.logger.With("error", err).ErrorContext(ctx, "failed to reap peers")
 			}
 		}
 	}
@@ -800,7 +809,7 @@ func (n *Node) selectPeersExcept(ctx context.Context, count int, exclude uint64)
 func (n *Node) selectPeer(ctx context.Context) (peer.Peer, error) {
 	peers, err := n.store.ListPeers(ctx)
 	if err != nil {
-		return peer.Peer{}, err
+		return peer.Peer{}, fmt.Errorf("failed to list peers: %w", err)
 	}
 
 	availablePeers := make([]peer.Peer, 0)
@@ -820,4 +829,34 @@ func (n *Node) selectPeer(ctx context.Context) (peer.Peer, error) {
 	target := availablePeers[idx]
 
 	return target, nil
+}
+
+func (n *Node) reap(ctx context.Context) error {
+	peers, err := n.store.ListPeers(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list peers: %w", err)
+	}
+
+	for _, p := range peers {
+		if p.Status != peer.StatusGone && p.Status != peer.StatusLeft {
+			continue
+		}
+
+		ts := time.Unix(0, p.Delta)
+		if time.Since(ts) < n.reapInterval {
+			continue
+		}
+
+		err = n.store.RemovePeer(ctx, p.ID)
+		switch {
+		case errors.Is(err, store.ErrPeerNotFound):
+			continue
+		case err != nil:
+			return fmt.Errorf("failed to remove peer %q: %w", p.ID, err)
+		}
+
+		n.ciphers.Remove(p.Hash())
+	}
+
+	return nil
 }

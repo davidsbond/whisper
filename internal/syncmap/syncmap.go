@@ -45,3 +45,11 @@ func (m *Map[K, V]) Values() []V {
 
 	return slices.Collect(maps.Values(m.stuff))
 }
+
+// Remove an entry from the Map.
+func (m *Map[K, V]) Remove(k K) {
+	m.mux.Lock()
+	defer m.mux.Unlock()
+
+	delete(m.stuff, k)
+}

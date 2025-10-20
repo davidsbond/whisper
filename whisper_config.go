@@ -28,6 +28,7 @@ type (
 		store          PeerStore
 		gossipInterval time.Duration
 		checkInterval  time.Duration
+		reapInterval   time.Duration
 		clientTLS      *tls.Config
 		serverTLS      *tls.Config
 	}
@@ -41,6 +42,9 @@ type (
 		SavePeer(ctx context.Context, peer peer.Peer) error
 		// ListPeers should return all peers within the store.
 		ListPeers(ctx context.Context) ([]peer.Peer, error)
+		// RemovePeer should remove a peer from the store. It should return store.ErrPeerNotFound if a matching
+		// peer does not exist.
+		RemovePeer(ctx context.Context, id uint64) error
 	}
 )
 
@@ -63,6 +67,7 @@ func defaultConfig() *config {
 		// Default durations for gossiping
 		gossipInterval: 5 * time.Second,
 		checkInterval:  time.Minute / 2,
+		reapInterval:   time.Hour,
 	}
 }
 
@@ -142,6 +147,14 @@ func WithGossipInterval(interval time.Duration) Option {
 func WithCheckInterval(interval time.Duration) Option {
 	return func(c *config) {
 		c.checkInterval = interval
+	}
+}
+
+// WithReapInterval modifies the interval at which peers will be removed from the store if they have been in the "gone"
+// state for longer than the specified interval. Defaults to 1 hour.
+func WithReapInterval(interval time.Duration) Option {
+	return func(c *config) {
+		c.reapInterval = interval
 	}
 }
 
