@@ -1,12 +1,17 @@
 # whisper
 
+[![go](https://github.com/davidsbond/whisper/actions/workflows/go.yml/badge.svg?branch=main)](https://github.com/davidsbond/whisper/actions/workflows/go.yml) [![Go Reference](https://pkg.go.dev/badge/github.com/davidsbond/whisper.svg)](https://pkg.go.dev/github.com/davidsbond/whisper) ![GitHub License](https://img.shields.io/github/license/davidsbond/whisper)
+
 A gRPC-based gossip protocol
 
 ## About
 
 `whisper` is a go package providing a simple gossip protocol mechanism that allows peers within a network to discover
-each other and share metadata. It utilises UDP and ECDH for fast and secure convergence. It is heavily inspired by
-[HashiCorp Serf](https://github.com/hashicorp/serf) and [Wireguard](https://www.wireguard.com/).
+each other and share metadata. It utilises UDP and ECDH for fast and secure convergence. It is inspired by technologies
+such as [HashiCorp Serf](https://github.com/hashicorp/serf) and [Wireguard](https://www.wireguard.com/).
+
+Whisper aims to provide a foundation for building distributed systems where automatic discovery of new nodes is
+applicable, with an emphasis on keeping information about your peers secure.
 
 ### Joining
 
@@ -101,16 +106,16 @@ within the network.
 ```go
 // The PeerStore interface describes types that can persist peer data.
 PeerStore interface {
-    // FindPeer should return the peer.Peer whose identifier matches the one provided. It should return
-    // store.ErrPeerNotFound if a matching peer does not exist.
-    FindPeer(ctx context.Context, id uint64) (peer.Peer, error)
-    // SavePeer should persist the given peer.Peer.
-    SavePeer(ctx context.Context, peer peer.Peer) error
-    // ListPeers should return all peers within the store.
-    ListPeers(ctx context.Context) ([]peer.Peer, error)
-    // RemovePeer should remove a peer from the store. It should return store.ErrPeerNotFound if a matching
-    // peer does not exist.
-    RemovePeer(ctx context.Context, id uint64) error
+// FindPeer should return the peer.Peer whose identifier matches the one provided. It should return
+// store.ErrPeerNotFound if a matching peer does not exist.
+FindPeer(ctx context.Context, id uint64) (peer.Peer, error)
+// SavePeer should persist the given peer.Peer.
+SavePeer(ctx context.Context, peer peer.Peer) error
+// ListPeers should return all peers within the store.
+ListPeers(ctx context.Context) ([]peer.Peer, error)
+// RemovePeer should remove a peer from the store. It should return store.ErrPeerNotFound if a matching
+// peer does not exist.
+RemovePeer(ctx context.Context, id uint64) error
 }
 ```
 
