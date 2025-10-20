@@ -2,6 +2,7 @@ package start
 
 import (
 	"crypto/ecdh"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/davidsbond/whisper"
+	"github.com/davidsbond/whisper/internal/tlsutil"
 )
 
 func Command() *cobra.Command {
@@ -18,6 +20,9 @@ func Command() *cobra.Command {
 		address     string
 		joinAddress string
 		keyFile     string
+		tlsCert     string
+		tlsKey      string
+		tlsCA       string
 	)
 
 	cmd := &cobra.Command{
@@ -51,6 +56,14 @@ func Command() *cobra.Command {
 				}
 			}
 
+			var tlsConfig *tls.Config
+			if tlsCert != "" && tlsKey != "" && tlsCA != "" {
+				tlsConfig, err = tlsutil.LoadConfig(tlsCert, tlsKey, tlsCA)
+				if err != nil {
+					return fmt.Errorf("failed to load tls config: %w", err)
+				}
+			}
+
 			node := whisper.New(id,
 				whisper.WithPort(port),
 				whisper.WithAddress(address),
@@ -58,6 +71,7 @@ func Command() *cobra.Command {
 				whisper.WithLogger(slog.Default().With("local_id", id)),
 				whisper.WithCurve(curve),
 				whisper.WithKey(key),
+				whisper.WithTLS(tlsConfig),
 			)
 
 			return node.Run(cmd.Context())
@@ -65,10 +79,13 @@ func Command() *cobra.Command {
 	}
 
 	flags := cmd.Flags()
-	flags.IntVarP(&port, "port", "p", 8000, "port to use for TCP/UDP")
-	flags.StringVarP(&address, "address", "a", "0.0.0.0:8000", "address to advertise to other peers")
-	flags.StringVarP(&joinAddress, "join", "j", "", "address to use for joining the gossip network")
-	flags.StringVarP(&keyFile, "key", "k", "", "path to private key file")
+	flags.IntVar(&port, "port", 8000, "port to use for TCP/UDP")
+	flags.StringVar(&address, "address", "0.0.0.0:8000", "address to advertise to other peers")
+	flags.StringVar(&joinAddress, "join", "", "address to use for joining the gossip network")
+	flags.StringVar(&keyFile, "key", "", "path to private ECDH key file for gossip over UDP")
+	flags.StringVar(&tlsCert, "tls-cert", "", "path to TLS certificate")
+	flags.StringVar(&tlsKey, "tls-key", "", "path to TLS key")
+	flags.StringVar(&tlsCA, "tls-ca", "", "path to TLS CA")
 
 	return cmd
 }

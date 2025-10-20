@@ -3,6 +3,7 @@ package whisper
 import (
 	"context"
 	"crypto/ecdh"
+	"crypto/tls"
 	"log/slog"
 	"time"
 
@@ -27,6 +28,8 @@ type (
 		store          PeerStore
 		gossipInterval time.Duration
 		checkInterval  time.Duration
+		clientTLS      *tls.Config
+		serverTLS      *tls.Config
 	}
 
 	// The PeerStore interface describes types that can persist peer data.
@@ -139,5 +142,21 @@ func WithGossipInterval(interval time.Duration) Option {
 func WithCheckInterval(interval time.Duration) Option {
 	return func(c *config) {
 		c.checkInterval = interval
+	}
+}
+
+// WithTLS modifies the TLS configuration to be used by the node for serving and dialing TCP connections.
+func WithTLS(cfg *tls.Config) Option {
+	return func(c *config) {
+		serverCfg := cfg.Clone()
+
+		serverCfg.ClientAuth = tls.RequireAndVerifyClientCert
+		serverCfg.RootCAs = nil // Server doesn't use RootCAs
+
+		clientCfg := cfg.Clone()
+		clientCfg.ClientCAs = nil // Client doesn't use ClientCAs
+
+		c.serverTLS = serverCfg
+		c.clientTLS = clientCfg
 	}
 }

@@ -4,10 +4,17 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
 	"log/slog"
+	"math/big"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"testing"
 	"time"
 
@@ -64,10 +71,13 @@ func (s *WhisperTestSuite) TestSingleNode() {
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	nodes, _ := createNodes(t, s.logger, 1)
+	ca, key := testCA(t)
+	nodes, _ := createNodes(t, s.logger, ca, key, 1)
 	runNodes(t, ctx, nodes)
+	testTLS := testTLSConfig(t, ca, key, "test")
 
-	client := dialPeer(t, nodes[0].Address())
+	client := dialPeer(t, testTLS, nodes[0].Address())
+
 	t.Run("advertises self", func(t *testing.T) {
 		response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
 		require.NoError(t, err)
@@ -91,15 +101,17 @@ func (s *WhisperTestSuite) TestMultiNode() {
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	nodes, _ := createNodes(t, s.logger, 5)
+	ca, key := testCA(t)
+	nodes, _ := createNodes(t, s.logger, ca, key, 5)
 	closers := runNodes(t, ctx, nodes)
+	testTLS := testTLSConfig(t, ca, key, "test")
 
 	<-time.After(time.Second * 10)
 
 	t.Run("state is synchronised", func(t *testing.T) {
 		for _, node := range nodes {
 			t.Run(fmt.Sprintf("on node %d", node.ID()), func(t *testing.T) {
-				client := dialPeer(t, node.Address())
+				client := dialPeer(t, testTLS, node.Address())
 
 				response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
 				require.NoError(t, err)
@@ -111,7 +123,7 @@ func (s *WhisperTestSuite) TestMultiNode() {
 	t.Run("liveness can be checked", func(t *testing.T) {
 		for _, node := range nodes {
 			t.Run(fmt.Sprintf("from node %d", node.ID()), func(t *testing.T) {
-				client := dialPeer(t, node.Address())
+				client := dialPeer(t, testTLS, node.Address())
 
 				for _, target := range nodes {
 					if target.ID() == node.ID() {
@@ -141,7 +153,7 @@ func (s *WhisperTestSuite) TestMultiNode() {
 					}
 
 					t.Run(fmt.Sprintf("to node %d", node.ID()), func(t *testing.T) {
-						client := dialPeer(t, node.Address())
+						client := dialPeer(t, testTLS, node.Address())
 
 						response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
 						require.NoError(t, err)
@@ -172,7 +184,7 @@ func (s *WhisperTestSuite) TestMultiNode() {
 					}
 
 					t.Run(fmt.Sprintf("detected by node %d", target.ID()), func(t *testing.T) {
-						client := dialPeer(t, target.Address())
+						client := dialPeer(t, testTLS, target.Address())
 
 						response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
 						require.NoError(t, err)
@@ -201,8 +213,11 @@ func (s *WhisperTestSuite) TestFailureDetection() {
 	defer cancel()
 
 	curve := ecdh.X25519()
-	nodes, stores := createNodes(t, s.logger, 2)
+	ca, key := testCA(t)
+	nodes, stores := createNodes(t, s.logger, ca, key, 2)
 	runNodes(t, ctx, nodes)
+
+	testTLS := testTLSConfig(t, ca, key, "test")
 
 	deadPeerKey, err := curve.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -225,7 +240,7 @@ func (s *WhisperTestSuite) TestFailureDetection() {
 	t.Run("node is marked as gone", func(t *testing.T) {
 		for _, node := range nodes {
 			t.Run(fmt.Sprintf("on node %d", node.ID()), func(t *testing.T) {
-				client := dialPeer(t, node.Address())
+				client := dialPeer(t, testTLS, node.Address())
 				response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
 				require.NoError(t, err)
 
@@ -242,17 +257,17 @@ func (s *WhisperTestSuite) TestFailureDetection() {
 	})
 }
 
-func dialPeer(t *testing.T, address string) whispersvcv1.WhisperServiceClient {
+func dialPeer(t *testing.T, cfg *tls.Config, address string) whispersvcv1.WhisperServiceClient {
 	t.Helper()
 
-	client, closer, err := peer.Dial(address)
+	client, closer, err := peer.Dial(address, cfg)
 	require.NoError(t, err)
 
 	t.Cleanup(closer)
 	return client
 }
 
-func createNodes(t *testing.T, logger *slog.Logger, count int) ([]*whisper.Node, []whisper.PeerStore) {
+func createNodes(t *testing.T, logger *slog.Logger, caCert *x509.Certificate, caKey *rsa.PrivateKey, count int) ([]*whisper.Node, []whisper.PeerStore) {
 	t.Helper()
 
 	nodes := make([]*whisper.Node, count)
@@ -261,7 +276,7 @@ func createNodes(t *testing.T, logger *slog.Logger, count int) ([]*whisper.Node,
 	for i := range count {
 		id := i + 1
 		port := 8000 + i
-
+		tlsConfig := testTLSConfig(t, caCert, caKey, strconv.Itoa(i))
 		st := store.NewInMemoryStore()
 
 		options := []whisper.Option{
@@ -271,6 +286,7 @@ func createNodes(t *testing.T, logger *slog.Logger, count int) ([]*whisper.Node,
 			whisper.WithStore(st),
 			whisper.WithCheckInterval(time.Second * 10),
 			whisper.WithGossipInterval(time.Second),
+			whisper.WithTLS(tlsConfig),
 		}
 
 		if i > 0 {
@@ -310,4 +326,82 @@ func runNodes(t *testing.T, ctx context.Context, nodes []*whisper.Node) []contex
 	})
 
 	return closers
+}
+
+func testCA(t *testing.T) (*x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	caCert := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "Whisper Root CA",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, caCert, caCert, &caKey.PublicKey, caKey)
+	require.NoError(t, err)
+
+	caCert, err = x509.ParseCertificate(certDER)
+	require.NoError(t, err)
+
+	return caCert, caKey
+}
+
+func testCert(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKey, name string) (tls.Certificate, *x509.Certificate) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	certTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject: pkix.Name{
+			CommonName: name,
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour),
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		BasicConstraintsValid: true,
+		DNSNames:              []string{name, "localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("0.0.0.0")},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, certTmpl, caCert, &key.PublicKey, caKey)
+	require.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(certDER)
+	require.NoError(t, err)
+
+	tlsCert := tls.Certificate{
+		Certificate: [][]byte{certDER, caCert.Raw},
+		PrivateKey:  key,
+	}
+
+	return tlsCert, cert
+}
+
+func testTLSConfig(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKey, name string) *tls.Config {
+	caPool := x509.NewCertPool()
+	caPool.AddCert(caCert)
+
+	cert, _ := testCert(t, caCert, caKey, name)
+
+	cfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientCAs:    caPool,
+		RootCAs:      caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		MinVersion:   tls.VersionTLS13,
+	}
+
+	return cfg
 }

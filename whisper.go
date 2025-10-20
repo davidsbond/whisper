@@ -18,6 +18,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +33,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -67,8 +69,10 @@ type (
 		metadata proto.Message
 
 		// Used for networking
-		port  int
-		bytes *bytepool.Pool
+		port      int
+		bytes     *bytepool.Pool
+		clientTLS *tls.Config
+		serverTLS *tls.Config
 
 		// Used to signal the node is up and running
 		ready        chan struct{}
@@ -101,6 +105,8 @@ func New(id uint64, options ...Option) *Node {
 		joinAddress:    cfg.joinAddress,
 		gossipInterval: cfg.gossipInterval,
 		checkInterval:  cfg.checkInterval,
+		clientTLS:      cfg.clientTLS,
+		serverTLS:      cfg.serverTLS,
 		bytes:          bytepool.New(udpSize),
 		cipherCache:    syncmap.New[string, cipher.AEAD](),
 		ready:          make(chan struct{}, 1),
@@ -240,30 +246,19 @@ func (n *Node) bootstrap(ctx context.Context) error {
 }
 
 func (n *Node) join(ctx context.Context, self peer.Peer) error {
-	client, closer, err := peer.Dial(n.joinAddress)
+	client, closer, err := peer.Dial(n.joinAddress, n.clientTLS)
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
 	}
 
 	defer closer()
 
-	request := &whispersvcv1.JoinRequest{
-		Peer: &whisperv1.Peer{
-			Id:        self.ID,
-			Address:   self.Address,
-			PublicKey: self.PublicKey.Bytes(),
-			Delta:     self.Delta,
-			Status:    whisperv1.PeerStatus(self.Status),
-		},
+	p, err := peer.ToProto(self)
+	if err != nil {
+		return fmt.Errorf("failed to convert local peer state to proto: %w", err)
 	}
 
-	if self.Metadata != nil {
-		request.Peer.Metadata, err = anypb.New(self.Metadata)
-		if err != nil {
-			return fmt.Errorf("failed to marshal metadata: %w", err)
-		}
-	}
-
+	request := &whispersvcv1.JoinRequest{Peer: p}
 	response, err := client.Join(ctx, request)
 	if err != nil {
 		return fmt.Errorf("failed to send join request: %w", err)
@@ -304,7 +299,7 @@ func (n *Node) leave() error {
 		return nil
 	}
 
-	client, closer, err := peer.Dial(selected.Address)
+	client, closer, err := peer.Dial(selected.Address, n.clientTLS)
 	if err != nil {
 		return fmt.Errorf("failed to dial peer: %w", err)
 	}
@@ -344,8 +339,13 @@ func (n *Node) listenTCP(ctx context.Context) error {
 		return fmt.Errorf("failed to listen on port %d: %w", n.port, err)
 	}
 
-	server := grpc.NewServer()
-	service.New(n.id, n.store, n.curve, n.logger).Register(server)
+	var options []grpc.ServerOption
+	if n.serverTLS != nil {
+		options = append(options, grpc.Creds(credentials.NewTLS(n.serverTLS)))
+	}
+
+	server := grpc.NewServer(options...)
+	service.New(n.id, n.store, n.curve, n.logger, n.clientTLS).Register(server)
 
 	group, ctx := errgroup.WithContext(ctx)
 
@@ -546,25 +546,15 @@ func (n *Node) decryptPeer(source peer.Peer, message *whisperv1.PeerMessage) (pe
 	return p, nil
 }
 
-func (n *Node) encryptPeer(target, peer peer.Peer) (nonce, ciphertext []byte, err error) {
+func (n *Node) encryptPeer(target, p peer.Peer) (nonce, ciphertext []byte, err error) {
 	gcm, err := n.getGCM(target)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get GCM: %w", err)
 	}
 
-	protoPeer := &whisperv1.Peer{
-		Id:        peer.ID,
-		Address:   peer.Address,
-		PublicKey: peer.PublicKey.Bytes(),
-		Delta:     peer.Delta,
-		Status:    whisperv1.PeerStatus(peer.Status),
-	}
-
-	if peer.Metadata != nil {
-		protoPeer.Metadata, err = anypb.New(peer.Metadata)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to marshal peer metadata: %w", err)
-		}
+	protoPeer, err := peer.ToProto(p)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to convert peer: %w", err)
 	}
 
 	plaintext, err := proto.Marshal(protoPeer)
@@ -691,7 +681,7 @@ func (n *Node) checkPeer(ctx context.Context) error {
 		return nil
 	}
 
-	client, closer, err := peer.Dial(target.Address)
+	client, closer, err := peer.Dial(target.Address, n.clientTLS)
 	if err != nil {
 		if err = n.checkPeerViaPeers(ctx, target); err != nil {
 			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
@@ -743,7 +733,7 @@ func (n *Node) checkPeerViaPeer(ctx context.Context, target peer.Peer, via peer.
 		With("peer", target.ID, "via", via.ID).
 		WarnContext(ctx, "failed to check peer liveness directly, checking via another peer")
 
-	client, closer, err := peer.Dial(via.Address)
+	client, closer, err := peer.Dial(via.Address, n.clientTLS)
 	if err != nil {
 		return false, fmt.Errorf("failed to dial peer: %w", err)
 	}
@@ -828,11 +818,6 @@ func (n *Node) selectPeer(ctx context.Context) (peer.Peer, error) {
 
 	idx := mathrand.IntN(len(availablePeers))
 	target := availablePeers[idx]
-
-	// We never want to select ourselves or a peer with an inactive status.
-	if target.ID == n.id || target.Status != peer.StatusJoined {
-		return n.selectPeer(ctx)
-	}
 
 	return target, nil
 }

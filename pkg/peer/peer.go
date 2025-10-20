@@ -4,11 +4,14 @@ package peer
 import (
 	"crypto/ecdh"
 	"crypto/sha256"
+	"crypto/tls"
 	"fmt"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
 	whisperv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1"
@@ -37,6 +40,8 @@ type (
 	Status int
 )
 
+// FromProto converts the provided protobuf representation of a peer into a Peer type. It also includes pre-hashing
+// the public key for caching GCMs in the gossip process.
 func FromProto(in *whisperv1.Peer, curve ecdh.Curve) (Peer, error) {
 	publicKey, err := curve.NewPublicKey(in.GetPublicKey())
 	if err != nil {
@@ -61,6 +66,28 @@ func FromProto(in *whisperv1.Peer, curve ecdh.Curve) (Peer, error) {
 	}
 
 	return peer, nil
+}
+
+// ToProto converts the provided Peer into its protobuf representation.
+func ToProto(peer Peer) (*whisperv1.Peer, error) {
+	p := &whisperv1.Peer{
+		Id:        peer.ID,
+		Address:   peer.Address,
+		PublicKey: peer.PublicKey.Bytes(),
+		Delta:     peer.Delta,
+		Status:    whisperv1.PeerStatus(peer.Status),
+	}
+
+	if peer.Metadata != nil {
+		metadata, err := anypb.New(peer.Metadata)
+		if err != nil {
+			return nil, fmt.Errorf("invalid peer metadata: %w", err)
+		}
+
+		p.Metadata = metadata
+	}
+
+	return p, nil
 }
 
 // IsEmpty returns true if the peer has an unspecified status. In all valid scenarios a peer should have a non-zero
@@ -89,8 +116,13 @@ const (
 
 // Dial the peer at the given address. Returns the client, a closer function and a possible error. The closer function
 // must be called when you are done with the client.
-func Dial(address string) (whispersvcv1.WhisperServiceClient, func(), error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func Dial(address string, tls *tls.Config) (whispersvcv1.WhisperServiceClient, func(), error) {
+	credential := insecure.NewCredentials()
+	if tls != nil {
+		credential = credentials.NewTLS(tls)
+	}
+
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(credential))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create grpc client: %w", err)
 	}

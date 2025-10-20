@@ -178,7 +178,7 @@ func TestService_Join(t *testing.T) {
 				tc.Setup(s)
 			}
 
-			response, err := service.New(tc.ID, s, curve, logger).Join(t.Context(), tc.Request)
+			response, err := service.New(tc.ID, s, curve, logger, nil).Join(t.Context(), tc.Request)
 			if tc.ExpectsError {
 				require.Error(t, err)
 				assert.Nil(t, response)

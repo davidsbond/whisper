@@ -1,6 +1,7 @@
 package check
 
 import (
+	"crypto/tls"
 	"fmt"
 	"strconv"
 
@@ -9,11 +10,18 @@ import (
 	"google.golang.org/grpc/status"
 
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
+	"github.com/davidsbond/whisper/internal/tlsutil"
 	"github.com/davidsbond/whisper/pkg/peer"
 )
 
 func Command() *cobra.Command {
-	return &cobra.Command{
+	var (
+		tlsCert string
+		tlsKey  string
+		tlsCA   string
+	)
+
+	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "Check a whisper node is available via another whisper node.",
 		Example: `
@@ -26,8 +34,16 @@ func Command() *cobra.Command {
 				return fmt.Errorf("failed to parse id: %w", err)
 			}
 
+			var tlsConfig *tls.Config
+			if tlsCert != "" && tlsKey != "" && tlsCA != "" {
+				tlsConfig, err = tlsutil.LoadConfig(tlsCert, tlsKey, tlsCA)
+				if err != nil {
+					return fmt.Errorf("failed to load tls config: %w", err)
+				}
+			}
+
 			address := args[1]
-			client, closer, err := peer.Dial(address)
+			client, closer, err := peer.Dial(address, tlsConfig)
 			if err != nil {
 				return fmt.Errorf("failed to connect to %q: %w", address, err)
 			}
@@ -48,4 +64,11 @@ func Command() *cobra.Command {
 			return nil
 		},
 	}
+
+	flags := cmd.Flags()
+	flags.StringVar(&tlsCert, "tls-cert", "", "path to TLS certificate")
+	flags.StringVar(&tlsKey, "tls-key", "", "path to TLS key")
+	flags.StringVar(&tlsCA, "tls-ca", "", "path to TLS CA")
+
+	return cmd
 }

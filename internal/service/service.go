@@ -4,6 +4,7 @@ package service
 import (
 	"context"
 	"crypto/ecdh"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -31,6 +32,7 @@ type (
 		peers  PeerStore
 		curve  ecdh.Curve
 		logger *slog.Logger
+		tls    *tls.Config
 	}
 
 	// The PeerStore interface describes types that persist the current state of all peers within the gossip network.
@@ -46,12 +48,13 @@ type (
 )
 
 // New returns a new instance of the Service type that will persist peer data using the provided PeerStore implementation.
-func New(id uint64, peers PeerStore, curve ecdh.Curve, logger *slog.Logger) *Service {
+func New(id uint64, peers PeerStore, curve ecdh.Curve, logger *slog.Logger, tls *tls.Config) *Service {
 	return &Service{
 		id:     id,
 		peers:  peers,
 		curve:  curve,
 		logger: logger,
+		tls:    tls,
 	}
 }
 
@@ -228,7 +231,7 @@ func (svc *Service) Check(ctx context.Context, r *whispersvcv1.CheckRequest) (*w
 		return nil, status.Errorf(codes.FailedPrecondition, "peer %q is in status: %v", r.GetId(), target.Status)
 	}
 
-	client, closer, err := peer.Dial(target.Address)
+	client, closer, err := peer.Dial(target.Address, svc.tls)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to dial peer %q: %v", target.ID, err)
 	}
