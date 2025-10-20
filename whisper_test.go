@@ -111,11 +111,9 @@ func (s *WhisperTestSuite) TestMultiNode() {
 	t.Run("state is synchronised", func(t *testing.T) {
 		for _, node := range nodes {
 			t.Run(fmt.Sprintf("on node %d", node.ID()), func(t *testing.T) {
-				client := dialPeer(t, testTLS, node.Address())
-
-				response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
+				peers, err := node.Peers(ctx)
 				require.NoError(t, err)
-				require.Len(t, response.GetPeers(), len(nodes)-1)
+				require.Len(t, peers, len(nodes))
 			})
 		}
 	})
@@ -153,19 +151,15 @@ func (s *WhisperTestSuite) TestMultiNode() {
 					}
 
 					t.Run(fmt.Sprintf("to node %d", node.ID()), func(t *testing.T) {
-						client := dialPeer(t, testTLS, node.Address())
-
-						response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
+						peers, err := node.Peers(ctx)
 						require.NoError(t, err)
 
-						for _, p := range response.GetPeers() {
-							if p.GetId() != target.ID() {
+						for _, p := range peers {
+							if p.ID != target.ID() {
 								continue
 							}
 
-							actual, err := p.GetMetadata().UnmarshalNew()
-							require.NoError(t, err)
-							assert.True(t, proto.Equal(expected, actual))
+							assert.True(t, proto.Equal(expected, p.Metadata))
 						}
 					})
 				}
@@ -184,17 +178,15 @@ func (s *WhisperTestSuite) TestMultiNode() {
 					}
 
 					t.Run(fmt.Sprintf("detected by node %d", target.ID()), func(t *testing.T) {
-						client := dialPeer(t, testTLS, target.Address())
-
-						response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
+						peers, err := target.Peers(ctx)
 						require.NoError(t, err)
 
-						for _, p := range response.GetPeers() {
-							if p.GetId() != node.ID() {
+						for _, p := range peers {
+							if p.ID != node.ID() {
 								continue
 							}
 
-							assert.EqualValues(t, whisperv1.PeerStatus_PEER_STATUS_LEFT, p.GetStatus())
+							assert.EqualValues(t, peer.StatusLeft, p.Status)
 							break
 						}
 
@@ -217,8 +209,6 @@ func (s *WhisperTestSuite) TestFailureDetection() {
 	nodes, stores := createNodes(t, s.logger, ca, key, 2)
 	runNodes(t, ctx, nodes)
 
-	testTLS := testTLSConfig(t, ca, key, "test")
-
 	deadPeerKey, err := curve.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
@@ -240,16 +230,15 @@ func (s *WhisperTestSuite) TestFailureDetection() {
 	t.Run("node is marked as gone", func(t *testing.T) {
 		for _, node := range nodes {
 			t.Run(fmt.Sprintf("on node %d", node.ID()), func(t *testing.T) {
-				client := dialPeer(t, testTLS, node.Address())
-				response, err := client.Status(ctx, &whispersvcv1.StatusRequest{})
+				peers, err := node.Peers(ctx)
 				require.NoError(t, err)
 
-				for _, p := range response.GetPeers() {
-					if p.GetId() != deadPeer.ID {
+				for _, p := range peers {
+					if p.ID != deadPeer.ID {
 						continue
 					}
 
-					assert.EqualValues(t, whisperv1.PeerStatus_PEER_STATUS_GONE, p.GetStatus())
+					assert.EqualValues(t, peer.StatusGone, p.Status)
 					break
 				}
 			})
@@ -307,7 +296,7 @@ func runNodes(t *testing.T, ctx context.Context, nodes []*whisper.Node) []contex
 	group, gCtx := errgroup.WithContext(ctx)
 	for i, node := range nodes {
 		if i > 0 {
-			<-time.After(time.Second * 5)
+			<-time.After(time.Second * 2)
 		}
 
 		group.Go(func() error {

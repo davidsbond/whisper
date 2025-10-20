@@ -14,7 +14,8 @@ A peer joins the network using an initial TCP connection to an existing peer. Wh
 information about itself, including its public key and an advertised address used for further UDP/TCP communication. If
 accepted into the network, the peer is given the current state of all known peers from the peer it joined.
 
-Peers do not share their private keys and the ability to join the network is handled at the TCP layer using TLS.
+Peers do not share their private keys and the ability to join the network can be handled at the TCP layer using TLS. By
+default, whisper does not enable TLS for TCP-based requests and must be configured to do so.
 
 ### Sharing State
 

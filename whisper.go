@@ -184,6 +184,11 @@ func (n *Node) Address() string {
 	return n.address
 }
 
+// Peers returns all peers within the gossip network known at the time it is called.
+func (n *Node) Peers(ctx context.Context) ([]peer.Peer, error) {
+	return n.store.ListPeers(ctx)
+}
+
 // SetMetadata updates the metadata on the Node. This causes a delta update which will be propagated out to the
 // gossip network.
 func (n *Node) SetMetadata(ctx context.Context, message proto.Message) error {
