@@ -21,7 +21,6 @@ builds:
 
 archives:
   - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    allow_different_binary_count: true
     formats:
       - zip
 
