@@ -687,23 +687,31 @@ func (n *Node) shareState(ctx context.Context) error {
 	var group errgroup.Group
 	for _, target := range targets {
 		group.Go(func() error {
-			for _, p := range peers {
-				if p.ID == target.ID {
-					// Don't tell peers about themselves, each peer owns its own state except in the scenario where
-					// one is leaving. But if it's leaving, it won't care for more updates.
-					continue
-				}
-
-				if err = n.sendPeerMessage(target, p); err != nil {
-					return fmt.Errorf("failed to send peer message to peer %q: %w", target.ID, err)
-				}
-			}
-
-			return nil
+			return n.sendPeerMessages(ctx, target, peers)
 		})
 	}
 
 	return group.Wait()
+}
+
+func (n *Node) sendPeerMessages(ctx context.Context, target peer.Peer, peers []peer.Peer) error {
+	for _, p := range peers {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if p.ID == target.ID {
+			// Don't tell peers about themselves, each peer owns its own state except in the scenario where
+			// one is leaving. But if it's leaving, it won't care for more updates.
+			continue
+		}
+
+		if err := n.sendPeerMessage(target, p); err != nil {
+			return fmt.Errorf("failed to send peer message to peer %d: %w", target.ID, err)
+		}
+	}
+
+	return nil
 }
 
 func (n *Node) checkPeer(ctx context.Context) error {
@@ -719,14 +727,14 @@ func (n *Node) checkPeer(ctx context.Context) error {
 	client, closer, err := peer.Dial(target.Address, n.clientTLS)
 	if err != nil {
 		if err = n.checkPeerViaPeers(ctx, target); err != nil {
-			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
+			return fmt.Errorf("failed to check peer %d via peer: %w", target.ID, err)
 		}
 	}
 
 	defer closer()
 	if _, err = client.Status(ctx, &whispersvcv1.StatusRequest{}); err != nil {
 		if err = n.checkPeerViaPeers(ctx, target); err != nil {
-			return fmt.Errorf("failed to check peer %q via peer: %w", target.ID, err)
+			return fmt.Errorf("failed to check peer %d via peer: %w", target.ID, err)
 		}
 	}
 
@@ -749,7 +757,7 @@ func (n *Node) checkPeerViaPeers(ctx context.Context, target peer.Peer) error {
 	for _, via := range checkVia {
 		reached, err := n.checkPeerViaPeer(ctx, target, via)
 		if err != nil {
-			return fmt.Errorf("failed to check peer %q via peer %q: %w", target.ID, via.ID, err)
+			return fmt.Errorf("failed to check peer %d via peer %d: %w", target.ID, via.ID, err)
 		}
 
 		// At least one of our selected peers was able to reach the target peer. Or they had an entry for that peer
@@ -764,7 +772,7 @@ func (n *Node) checkPeerViaPeers(ctx context.Context, target peer.Peer) error {
 		WarnContext(ctx, "peer was unavailable via other peers, marking as gone")
 
 	if err = n.markPeerGone(ctx, target); err != nil {
-		return fmt.Errorf("failed to mark peer %q as gone: %w", target.ID, err)
+		return fmt.Errorf("failed to mark peer %d as gone: %w", target.ID, err)
 	}
 
 	if err = n.writeEvent(ctx, event.TypeGone, target); err != nil {
@@ -799,7 +807,7 @@ func (n *Node) checkPeerViaPeer(ctx context.Context, target peer.Peer, via peer.
 		return false, nil
 	default:
 		// All other status codes are unexpected. We report that.
-		return false, fmt.Errorf("unexpected error checking peer %q: %w", target.ID, err)
+		return false, fmt.Errorf("unexpected error checking peer %d: %w", target.ID, err)
 	}
 }
 
@@ -889,7 +897,7 @@ func (n *Node) reap(ctx context.Context) error {
 		case errors.Is(err, store.ErrPeerNotFound):
 			continue
 		case err != nil:
-			return fmt.Errorf("failed to remove peer %q: %w", p.ID, err)
+			return fmt.Errorf("failed to remove peer %d: %w", p.ID, err)
 		}
 
 		n.ciphers.Remove(p.Hash())
