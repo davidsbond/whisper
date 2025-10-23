@@ -9,9 +9,11 @@ import (
 	"strconv"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/davidsbond/whisper"
 	"github.com/davidsbond/whisper/internal/tlsutil"
+	"github.com/davidsbond/whisper/pkg/event"
 )
 
 func Command() *cobra.Command {
@@ -64,17 +66,45 @@ func Command() *cobra.Command {
 				}
 			}
 
+			logger := slog.Default().With("local_id", id)
+
 			node := whisper.New(id,
 				whisper.WithPort(port),
 				whisper.WithAddress(address),
 				whisper.WithJoinAddress(joinAddress),
-				whisper.WithLogger(slog.Default().With("local_id", id)),
+				whisper.WithLogger(logger),
 				whisper.WithCurve(curve),
 				whisper.WithKey(key),
 				whisper.WithTLS(tlsConfig),
 			)
 
-			return node.Run(cmd.Context())
+			group, ctx := errgroup.WithContext(cmd.Context())
+			group.Go(func() error {
+				return node.Run(ctx)
+			})
+
+			group.Go(func() error {
+				for evt := range node.Events() {
+					switch evt.Type {
+					case event.TypeDiscovered:
+						logger.With("peer", evt.Peer.ID).InfoContext(ctx, "peer discovered")
+					case event.TypeUpdated:
+						logger.With("peer", evt.Peer.ID).InfoContext(ctx, "peer updated")
+					case event.TypeRemoved:
+						logger.With("peer", evt.Peer.ID).WarnContext(ctx, "peer removed")
+					case event.TypeLeft:
+						logger.With("peer", evt.Peer.ID).WarnContext(ctx, "peer left")
+					case event.TypeGone:
+						logger.With("peer", evt.Peer.ID).ErrorContext(ctx, "peer gone")
+					default:
+						continue
+					}
+				}
+
+				return nil
+			})
+
+			return group.Wait()
 		},
 	}
 

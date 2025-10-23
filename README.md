@@ -82,6 +82,14 @@ Below is a very concise example of starting a whisper node in-code:
 // See the package documentation for all available configuration options.
 node := whisper.New(id)
 
+// This is how you react to changes within the gossip network, by handling individual events. You'll want to do this
+// in its own goroutine. Events MUST be handled otherwise the node will eventually block on writing to the channel.
+for evt := range node.Events() {
+    switch evt.Type {
+        // ...
+    }
+}
+
 // This blocks until the given context is cancelled or a fatal error occurs, use it in a separate goroutine or
 // an error group
 node.Run(ctx)
@@ -105,17 +113,17 @@ within the network.
 
 ```go
 // The PeerStore interface describes types that can persist peer data.
-PeerStore interface {
-// FindPeer should return the peer.Peer whose identifier matches the one provided. It should return
-// store.ErrPeerNotFound if a matching peer does not exist.
-FindPeer(ctx context.Context, id uint64) (peer.Peer, error)
-// SavePeer should persist the given peer.Peer.
-SavePeer(ctx context.Context, peer peer.Peer) error
-// ListPeers should return all peers within the store.
-ListPeers(ctx context.Context) ([]peer.Peer, error)
-// RemovePeer should remove a peer from the store. It should return store.ErrPeerNotFound if a matching
-// peer does not exist.
-RemovePeer(ctx context.Context, id uint64) error
+type PeerStore interface {
+    // FindPeer should return the peer.Peer whose identifier matches the one provided. It should return
+    // store.ErrPeerNotFound if a matching peer does not exist.
+    FindPeer(ctx context.Context, id uint64) (peer.Peer, error)
+    // SavePeer should persist the given peer.Peer.
+    SavePeer(ctx context.Context, peer peer.Peer) error
+    // ListPeers should return all peers within the store.
+    ListPeers(ctx context.Context) ([]peer.Peer, error)
+    // RemovePeer should remove a peer from the store. It should return store.ErrPeerNotFound if a matching
+    // peer does not exist.
+    RemovePeer(ctx context.Context, id uint64) error
 }
 ```
 

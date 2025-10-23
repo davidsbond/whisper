@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
 	whisperv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1"
 	"github.com/davidsbond/whisper/internal/service"
+	"github.com/davidsbond/whisper/pkg/event"
 	"github.com/davidsbond/whisper/pkg/peer"
 	"github.com/davidsbond/whisper/pkg/store"
 )
@@ -178,7 +180,9 @@ func TestService_Join(t *testing.T) {
 				tc.Setup(s)
 			}
 
-			response, err := service.New(tc.ID, s, curve, logger, nil).Join(t.Context(), tc.Request)
+			events := make(chan event.Event, 1)
+
+			response, err := service.New(tc.ID, s, curve, logger, nil, events).Join(t.Context(), tc.Request)
 			if tc.ExpectsError {
 				require.Error(t, err)
 				assert.Nil(t, response)
@@ -196,6 +200,16 @@ func TestService_Join(t *testing.T) {
 				assert.EqualValues(t, expected.GetAddress(), actual.GetAddress())
 				assert.EqualValues(t, expected.GetMetadata(), actual.GetMetadata())
 				assert.EqualValues(t, expected.GetPublicKey(), actual.GetPublicKey())
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+
+			select {
+			case evt := <-events:
+				assert.EqualValues(t, tc.Request.GetPeer().GetId(), evt.Peer.ID)
+			case <-ctx.Done():
+				assert.Fail(t, "timed out waiting for event")
 			}
 		})
 	}

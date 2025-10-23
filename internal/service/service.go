@@ -14,10 +14,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/anypb"
 
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
 	whisperv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1"
+	"github.com/davidsbond/whisper/pkg/event"
 	"github.com/davidsbond/whisper/pkg/peer"
 	"github.com/davidsbond/whisper/pkg/store"
 )
@@ -33,6 +33,7 @@ type (
 		curve  ecdh.Curve
 		logger *slog.Logger
 		tls    *tls.Config
+		events chan<- event.Event
 	}
 
 	// The PeerStore interface describes types that persist the current state of all peers within the gossip network.
@@ -48,13 +49,14 @@ type (
 )
 
 // New returns a new instance of the Service type that will persist peer data using the provided PeerStore implementation.
-func New(id uint64, peers PeerStore, curve ecdh.Curve, logger *slog.Logger, tls *tls.Config) *Service {
+func New(id uint64, peers PeerStore, curve ecdh.Curve, logger *slog.Logger, tls *tls.Config, events chan<- event.Event) *Service {
 	return &Service{
 		id:     id,
 		peers:  peers,
 		curve:  curve,
 		logger: logger,
 		tls:    tls,
+		events: events,
 	}
 }
 
@@ -103,23 +105,23 @@ func (svc *Service) Join(ctx context.Context, r *whispersvcv1.JoinRequest) (*whi
 
 	response := &whispersvcv1.JoinResponse{Peers: make([]*whisperv1.Peer, len(peers))}
 	for i, p := range peers {
-		response.Peers[i] = &whisperv1.Peer{
-			Id:        p.ID,
-			Address:   p.Address,
-			PublicKey: p.PublicKey.Bytes(),
-			Delta:     p.Delta,
-			Status:    whisperv1.PeerStatus(p.Status),
-		}
-
-		if p.Metadata != nil {
-			response.Peers[i].Metadata, err = anypb.New(p.Metadata)
-			if err != nil {
-				return nil, status.Errorf(codes.Internal, "failed to marshal metadata for peer %d: %v", p.ID, err)
-			}
+		response.Peers[i], err = peer.ToProto(p)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to parse peer %d: %v", p.ID, err)
 		}
 	}
 
-	return response, nil
+	eventType := event.TypeDiscovered
+	if !existing.IsEmpty() {
+		eventType = event.TypeUpdated
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
+	case svc.events <- event.Event{Type: eventType, Peer: p}:
+		return response, nil
+	}
 }
 
 func (svc *Service) validateJoinRequest(r *whispersvcv1.JoinRequest) error {
@@ -170,7 +172,13 @@ func (svc *Service) Leave(ctx context.Context, r *whispersvcv1.LeaveRequest) (*w
 
 	svc.logger.With("peer", r.GetId()).DebugContext(ctx, "peer is leaving gossip network")
 
-	return &whispersvcv1.LeaveResponse{}, nil
+	// We have to publish an event here, otherwise the local peer will never hear about peers leaving.
+	select {
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
+	case svc.events <- event.Event{Type: event.TypeLeft, Peer: p}:
+		return &whispersvcv1.LeaveResponse{}, nil
+	}
 }
 
 // Status handles an inbound gRPC request querying this peer's current view of the gossip network.
@@ -185,19 +193,9 @@ func (svc *Service) Status(ctx context.Context, _ *whispersvcv1.StatusRequest) (
 	}
 
 	for _, p := range peers {
-		record := &whisperv1.Peer{
-			Id:        p.ID,
-			Address:   p.Address,
-			PublicKey: p.PublicKey.Bytes(),
-			Delta:     p.Delta,
-			Status:    whisperv1.PeerStatus(p.Status),
-		}
-
-		if p.Metadata != nil {
-			record.Metadata, err = anypb.New(p.Metadata)
-			if err != nil {
-				return nil, status.Errorf(codes.Internal, "failed to marshal metadata for peer %d: %v", p.ID, err)
-			}
+		record, err := peer.ToProto(p)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to parse peer %d: %v", p.ID, err)
 		}
 
 		if p.ID == svc.id {

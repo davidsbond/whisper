@@ -66,7 +66,7 @@ func defaultConfig() *config {
 		store: store.NewInMemoryStore(),
 		// Default durations for gossiping
 		gossipInterval: 5 * time.Second,
-		checkInterval:  time.Minute / 2,
+		checkInterval:  time.Second * 10,
 		reapInterval:   time.Hour,
 	}
 }
@@ -143,7 +143,7 @@ func WithGossipInterval(interval time.Duration) Option {
 }
 
 // WithCheckInterval modifies the interval at which the peer will confirm the liveness of a randomly selected active
-// peer. Defaults to 30 seconds.
+// peer. Defaults to 10 seconds.
 func WithCheckInterval(interval time.Duration) Option {
 	return func(c *config) {
 		c.checkInterval = interval
@@ -161,6 +161,10 @@ func WithReapInterval(interval time.Duration) Option {
 // WithTLS modifies the TLS configuration to be used by the node for serving and dialing TCP connections.
 func WithTLS(cfg *tls.Config) Option {
 	return func(c *config) {
+		if cfg == nil {
+			return
+		}
+
 		serverCfg := cfg.Clone()
 
 		serverCfg.ClientAuth = tls.RequireAndVerifyClientCert

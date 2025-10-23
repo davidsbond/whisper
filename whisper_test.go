@@ -300,6 +300,14 @@ func runNodes(t *testing.T, ctx context.Context, nodes []*whisper.Node) []contex
 		}
 
 		group.Go(func() error {
+			for evt := range node.Events() {
+				t.Logf("node %d got event %q for peer %d", node.ID(), evt.Type, evt.Peer.ID)
+			}
+
+			return nil
+		})
+
+		group.Go(func() error {
 			nCtx, nCancel := context.WithCancel(gCtx)
 			defer nCancel()
 

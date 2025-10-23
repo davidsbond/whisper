@@ -43,6 +43,7 @@ import (
 	whisperv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1"
 	"github.com/davidsbond/whisper/internal/service"
 	"github.com/davidsbond/whisper/internal/syncmap"
+	"github.com/davidsbond/whisper/pkg/event"
 	"github.com/davidsbond/whisper/pkg/peer"
 	"github.com/davidsbond/whisper/pkg/store"
 )
@@ -80,6 +81,9 @@ type (
 		listeningUDP atomic.Bool
 		listeningTCP atomic.Bool
 		gossiping    atomic.Bool
+
+		// Used for state events
+		events chan event.Event
 	}
 )
 
@@ -87,7 +91,9 @@ const (
 	udpSize = 65535
 )
 
-// New returns a new whisper node with the specified id. See the Option type for available configuration values.
+// New returns a new whisper node with the specified id. See the Option type for available configuration values. Once
+// a Node has been created you must call Node.Events method and handle its output. Otherwise, blocking will occur when
+// the first state change happens after calling Node.Run.
 func New(id uint64, options ...Option) *Node {
 	cfg := defaultConfig()
 	for _, opt := range options {
@@ -96,22 +102,23 @@ func New(id uint64, options ...Option) *Node {
 
 	return &Node{
 		id:             id,
-		key:            cfg.key,
-		curve:          cfg.curve,
-		address:        cfg.address,
-		metadata:       cfg.metadata,
+		joinAddress:    cfg.joinAddress,
 		logger:         cfg.logger,
 		store:          cfg.store,
-		port:           cfg.port,
-		joinAddress:    cfg.joinAddress,
 		gossipInterval: cfg.gossipInterval,
 		checkInterval:  cfg.checkInterval,
 		reapInterval:   cfg.reapInterval,
+		key:            cfg.key,
+		curve:          cfg.curve,
+		ciphers:        syncmap.New[string, cipher.AEAD](),
+		address:        cfg.address,
+		metadata:       cfg.metadata,
+		port:           cfg.port,
+		bytes:          bytepool.New(udpSize),
 		clientTLS:      cfg.clientTLS,
 		serverTLS:      cfg.serverTLS,
-		bytes:          bytepool.New(udpSize),
-		ciphers:        syncmap.New[string, cipher.AEAD](),
 		ready:          make(chan struct{}, 1),
+		events:         make(chan event.Event, 1),
 	}
 }
 
@@ -144,6 +151,8 @@ func (n *Node) Run(ctx context.Context) error {
 		<-ctx.Done()
 		defer cancel()
 		defer close(n.ready)
+		defer close(n.events)
+
 		return n.leave()
 	})
 
@@ -166,6 +175,12 @@ func (n *Node) Ready(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Events returns a channel from which peer events can be handled. See the event.Event type for more details. This method
+// should only be called once.
+func (n *Node) Events() <-chan event.Event {
+	return n.events
 }
 
 func (n *Node) reportReadiness() {
@@ -280,6 +295,10 @@ func (n *Node) join(ctx context.Context, self peer.Peer) error {
 		if err = n.store.SavePeer(ctx, p); err != nil {
 			return fmt.Errorf("failed to save peer record: %w", err)
 		}
+
+		if err = n.writeEvent(ctx, event.TypeDiscovered, p); err != nil {
+			return fmt.Errorf("failed to write event: %w", err)
+		}
 	}
 
 	if err = n.setStatus(ctx, peer.StatusJoined); err != nil {
@@ -352,7 +371,7 @@ func (n *Node) listenTCP(ctx context.Context) error {
 	}
 
 	server := grpc.NewServer(options...)
-	service.New(n.id, n.store, n.curve, n.logger, n.clientTLS).Register(server)
+	service.New(n.id, n.store, n.curve, n.logger, n.clientTLS, n.events).Register(server)
 
 	group, ctx := errgroup.WithContext(ctx)
 
@@ -473,21 +492,32 @@ func (n *Node) handlePeerMessage(ctx context.Context, payload []byte) {
 
 		if err = n.store.SavePeer(ctx, remote); err != nil {
 			logger.With("error", err).ErrorContext(ctx, "failed to save peer")
+			return
 		}
 
-		return
-	}
+		eventType := event.TypeUpdated
+		switch {
+		case remote.Status == peer.StatusLeft && local.Status != peer.StatusLeft:
+			eventType = event.TypeLeft
+		case remote.Status == peer.StatusGone && local.Status != peer.StatusGone:
+			eventType = event.TypeGone
+		case local.IsEmpty():
+			eventType = event.TypeDiscovered
+		}
 
-	// We're already up-to-date for this peer, so we'll exit early here.
-	if remote.Delta == local.Delta {
-		return
+		if err = n.writeEvent(ctx, eventType, remote); err != nil {
+			logger.With("error", err).ErrorContext(ctx, "failed to write event")
+			return
+		}
 	}
 
 	// In this case, the peer sending the data is out-of-date. So we'll send our local state for this peer
 	// to them.
-	if err = n.sendPeerMessage(source, local); err != nil {
-		logger.With("error", err).ErrorContext(ctx, "failed to send peer message")
-		return
+	if remote.Delta < local.Delta {
+		if err = n.sendPeerMessage(source, local); err != nil {
+			logger.With("error", err).ErrorContext(ctx, "failed to send peer message")
+			return
+		}
 	}
 }
 
@@ -644,25 +674,9 @@ func (n *Node) gossip(ctx context.Context) error {
 }
 
 func (n *Node) shareState(ctx context.Context) error {
-	target, err := n.selectPeer(ctx)
+	targets, err := n.selectPeersExcept(ctx, 3, n.id)
 	if err != nil {
-		return fmt.Errorf("failed to select peer: %w", err)
-	}
-
-	if target.IsEmpty() {
-		return nil
-	}
-
-	// Update our own delta to latest, this ensures if we have been marked as gone by another peer we'll
-	// overwrite that value
-	self, err := n.store.FindPeer(ctx, n.id)
-	if err != nil {
-		return fmt.Errorf("failed to lookup local peer record: %w", err)
-	}
-
-	self.Delta = time.Now().UnixNano()
-	if err = n.store.SavePeer(ctx, self); err != nil {
-		return fmt.Errorf("failed to save local peer record: %w", err)
+		return fmt.Errorf("failed to select peers: %w", err)
 	}
 
 	peers, err := n.store.ListPeers(ctx)
@@ -670,19 +684,26 @@ func (n *Node) shareState(ctx context.Context) error {
 		return fmt.Errorf("failed to list peers: %w", err)
 	}
 
-	for _, p := range peers {
-		if p.ID == target.ID {
-			// Don't tell peers about themselves, each peer owns its own state except in the scenario where
-			// one is leaving. But if it's leaving, it won't care for more updates.
-			continue
-		}
+	var group errgroup.Group
+	for _, target := range targets {
+		group.Go(func() error {
+			for _, p := range peers {
+				if p.ID == target.ID {
+					// Don't tell peers about themselves, each peer owns its own state except in the scenario where
+					// one is leaving. But if it's leaving, it won't care for more updates.
+					continue
+				}
 
-		if err = n.sendPeerMessage(target, p); err != nil {
-			return fmt.Errorf("failed to send peer message to peer %q: %w", target.ID, err)
-		}
+				if err = n.sendPeerMessage(target, p); err != nil {
+					return fmt.Errorf("failed to send peer message to peer %q: %w", target.ID, err)
+				}
+			}
+
+			return nil
+		})
 	}
 
-	return nil
+	return group.Wait()
 }
 
 func (n *Node) checkPeer(ctx context.Context) error {
@@ -718,6 +739,13 @@ func (n *Node) checkPeerViaPeers(ctx context.Context, target peer.Peer) error {
 		return fmt.Errorf("failed to select peers: %w", err)
 	}
 
+	logger := n.logger.With("peer", target.ID)
+
+	if len(checkVia) == 0 {
+		logger.WarnContext(ctx, "no peers available to check peer liveness")
+		return nil
+	}
+
 	for _, via := range checkVia {
 		reached, err := n.checkPeerViaPeer(ctx, target, via)
 		if err != nil {
@@ -731,12 +759,16 @@ func (n *Node) checkPeerViaPeers(ctx context.Context, target peer.Peer) error {
 		}
 	}
 
-	n.logger.
-		With("peer", target.ID, "via_count", len(checkVia)).
+	logger.
+		With("via_count", len(checkVia)).
 		WarnContext(ctx, "peer was unavailable via other peers, marking as gone")
 
 	if err = n.markPeerGone(ctx, target); err != nil {
 		return fmt.Errorf("failed to mark peer %q as gone: %w", target.ID, err)
+	}
+
+	if err = n.writeEvent(ctx, event.TypeGone, target); err != nil {
+		return fmt.Errorf("failed to write event: %w", err)
 	}
 
 	return nil
@@ -861,7 +893,19 @@ func (n *Node) reap(ctx context.Context) error {
 		}
 
 		n.ciphers.Remove(p.Hash())
+		if err = n.writeEvent(ctx, event.TypeRemoved, p); err != nil {
+			return fmt.Errorf("failed to write event: %w", err)
+		}
 	}
 
 	return nil
+}
+
+func (n *Node) writeEvent(ctx context.Context, t event.Type, p peer.Peer) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case n.events <- event.Event{Type: t, Peer: p}:
+		return nil
+	}
 }
