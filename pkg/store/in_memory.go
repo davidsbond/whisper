@@ -4,7 +4,8 @@ import (
 	"context"
 	"slices"
 
-	"github.com/davidsbond/whisper/internal/syncmap"
+	"github.com/davidsbond/x/syncmap"
+
 	"github.com/davidsbond/whisper/pkg/peer"
 )
 

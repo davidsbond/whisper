@@ -29,6 +29,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/davidsbond/x/slicepool"
+	"github.com/davidsbond/x/syncmap"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -38,11 +40,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
-	"github.com/davidsbond/whisper/internal/bytepool"
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
 	whisperv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1"
 	"github.com/davidsbond/whisper/internal/service"
-	"github.com/davidsbond/whisper/internal/syncmap"
 	"github.com/davidsbond/whisper/pkg/event"
 	"github.com/davidsbond/whisper/pkg/peer"
 	"github.com/davidsbond/whisper/pkg/store"
@@ -72,7 +72,7 @@ type (
 
 		// Used for networking
 		port      int
-		bytes     *bytepool.Pool
+		bytes     *slicepool.Pool[byte]
 		clientTLS *tls.Config
 		serverTLS *tls.Config
 
@@ -114,7 +114,7 @@ func New(id uint64, options ...Option) *Node {
 		address:        cfg.address,
 		metadata:       cfg.metadata,
 		port:           cfg.port,
-		bytes:          bytepool.New(udpSize),
+		bytes:          slicepool.New[byte](udpSize),
 		clientTLS:      cfg.clientTLS,
 		serverTLS:      cfg.serverTLS,
 		ready:          make(chan struct{}, 1),

@@ -1,8 +1,9 @@
 module github.com/davidsbond/whisper
 
-go 1.25
+go 1.25.1
 
 require (
+	github.com/davidsbond/x v0.0.0-20251024221531-7e823569a94e
 	github.com/spf13/cobra v1.10.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.43.0
