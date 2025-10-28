@@ -105,7 +105,7 @@ func (svc *Service) Join(ctx context.Context, r *whispersvcv1.JoinRequest) (*whi
 
 	response := &whispersvcv1.JoinResponse{Peers: make([]*whisperv1.Peer, len(peers))}
 	for i, p := range peers {
-		response.Peers[i], err = peer.ToProto(p)
+		response.Peers[i], err = p.ToProto()
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to parse peer %d: %v", p.ID, err)
 		}
@@ -193,7 +193,7 @@ func (svc *Service) Status(ctx context.Context, _ *whispersvcv1.StatusRequest) (
 	}
 
 	for _, p := range peers {
-		record, err := peer.ToProto(p)
+		record, err := p.ToProto()
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to parse peer %d: %v", p.ID, err)
 		}

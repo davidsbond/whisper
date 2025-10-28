@@ -69,25 +69,25 @@ func FromProto(in *whisperv1.Peer, curve ecdh.Curve) (Peer, error) {
 }
 
 // ToProto converts the provided Peer into its protobuf representation.
-func ToProto(peer Peer) (*whisperv1.Peer, error) {
-	p := &whisperv1.Peer{
-		Id:        peer.ID,
-		Address:   peer.Address,
-		PublicKey: peer.PublicKey.Bytes(),
-		Delta:     peer.Delta,
-		Status:    whisperv1.PeerStatus(peer.Status),
+func (p Peer) ToProto() (*whisperv1.Peer, error) {
+	peer := &whisperv1.Peer{
+		Id:        p.ID,
+		Address:   p.Address,
+		PublicKey: p.PublicKey.Bytes(),
+		Delta:     p.Delta,
+		Status:    whisperv1.PeerStatus(p.Status),
 	}
 
-	if peer.Metadata != nil {
-		metadata, err := anypb.New(peer.Metadata)
+	if p.Metadata != nil {
+		metadata, err := anypb.New(p.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("invalid peer metadata: %w", err)
 		}
 
-		p.Metadata = metadata
+		peer.Metadata = metadata
 	}
 
-	return p, nil
+	return peer, nil
 }
 
 // IsEmpty returns true if the peer has an unspecified status. In all valid scenarios a peer should have a non-zero

@@ -38,7 +38,6 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/anypb"
 
 	whispersvcv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/service/v1"
 	whisperv1 "github.com/davidsbond/whisper/internal/generated/proto/whisper/v1"
@@ -225,23 +224,15 @@ func (n *Node) SetMetadata(ctx context.Context, message proto.Message) error {
 
 func (n *Node) bootstrap(ctx context.Context) error {
 	self := peer.Peer{
-		ID:      n.id,
-		Address: n.address,
-		Delta:   time.Now().UnixNano(),
-		Status:  peer.StatusJoining,
+		ID:       n.id,
+		Address:  n.address,
+		Delta:    time.Now().UnixNano(),
+		Status:   peer.StatusJoining,
+		Metadata: n.metadata,
 	}
 
 	if n.joinAddress == "" {
 		self.Status = peer.StatusJoined
-	}
-
-	if n.metadata != nil {
-		metadata, err := anypb.New(n.metadata)
-		if err != nil {
-			return fmt.Errorf("invalid metadata: %w", err)
-		}
-
-		self.Metadata = metadata
 	}
 
 	if n.key == nil {
@@ -275,7 +266,7 @@ func (n *Node) join(ctx context.Context, self peer.Peer) error {
 
 	defer closer()
 
-	p, err := peer.ToProto(self)
+	p, err := self.ToProto()
 	if err != nil {
 		return fmt.Errorf("failed to convert local peer state to proto: %w", err)
 	}
@@ -589,7 +580,7 @@ func (n *Node) encryptPeer(target, p peer.Peer) (nonce, ciphertext []byte, err e
 		return nil, nil, fmt.Errorf("failed to get GCM: %w", err)
 	}
 
-	protoPeer, err := peer.ToProto(p)
+	protoPeer, err := p.ToProto()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to convert peer: %w", err)
 	}
